@@ -49,6 +49,13 @@ function createCloudStore() {
       const data = check(await sb.auth.signUp({ email, password, options: { data: { full_name: name }, emailRedirectTo: location.origin } }));
       return data.session ? loadProfile(data.user) : null; // null => email confirmation required
     },
+    // Confirms a new account with the code from its confirmation email.
+    async verifyEmailCode(email, code) {
+      let res = await sb.auth.verifyOtp({ email, token: code, type: "email" });
+      if (res.error) res = await sb.auth.verifyOtp({ email, token: code, type: "signup" });
+      if (res.error) throw new Error(/expired|invalid/i.test(res.error.message) ? "That code is wrong or has expired. Check it, or send a new one." : res.error.message);
+      return loadProfile(res.data.user);
+    },
     async resendConfirmation(email) {
       check(await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: location.origin } }));
     },

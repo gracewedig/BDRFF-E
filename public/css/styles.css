@@ -542,3 +542,5 @@ button.kpi { font: inherit; text-align: left; cursor: pointer; }
   .inline-add, .inline-add.big { display: flex; width: 100%; }
   .inline-add input { flex: 1; width: auto; }
 }
+
+.code-input { font-size: 24px !important; letter-spacing: .35em; text-align: center; font-variant-numeric: tabular-nums; }

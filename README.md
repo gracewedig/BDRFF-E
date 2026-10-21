@@ -67,6 +67,12 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 3. Invite everyone else from **Team & Roles**.
 4. Optional, recommended once everyone is invited: in Supabase → **Authentication → Providers/Sign In**, turn off “Allow new users to sign up”, and set `ALLOW_SIGNUP: false` in `config.js`, so only invited people can get in.
 
+**Verification codes:** new accounts confirm their email by typing a code. In Supabase → **Authentication → Emails → Templates → Confirm signup**, add this line to the message so the code is included (the link keeps working too):
+```html
+<p>Your verification code: <strong>{{ .Token }}</strong></p>
+```
+For reliable delivery to your team, set up your own sender under **Authentication → Emails → SMTP Settings** (e.g. your Microsoft 365 mailbox or Resend); Supabase's built-in sender is only for testing.
+
 ### 4. Hook up the shared FF&E inbox
 Email intake address (shown to managers on the Email Requests tab):
 ```

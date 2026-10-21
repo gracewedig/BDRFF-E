@@ -124,8 +124,7 @@ async function onRemoteChange(kind) {
 }
 
 /* ------------------------------------------------------------------ login */
-// resendTo: email that still needs confirming; shows a "Resend confirmation email" button.
-function renderLogin(mode = "signin", msg = "", resendTo = "") {
+function renderLogin(mode = "signin", msg = "") {
   const demo = store.mode === "demo";
   app.innerHTML = `
   <div class="login">
@@ -153,10 +152,9 @@ function renderLogin(mode = "signin", msg = "", resendTo = "") {
           <button class="tab ${mode === "signup" ? "on" : ""}" data-act="login-tab" data-mode="signup">Create account</button>
         </div>` : `<h2>Sign in</h2><p class="muted small">Ask a manager to invite you if you don't have an account yet.</p>`}
         ${msg ? `<p class="notice">${esc(msg)}</p>` : ""}
-        ${resendTo ? `<button type="button" class="btn" data-act="resend-confirm" data-email="${esc(resendTo)}">Resend confirmation email</button>` : ""}
         <form data-form="${mode}" class="stack">
           ${mode === "signup" ? `<label>Full name<input name="name" required autocomplete="name"></label>` : ""}
-          <label>Work email<input name="email" type="email" required autocomplete="email" value="${esc(resendTo)}"></label>
+          <label>Work email<input name="email" type="email" required autocomplete="email"></label>
           <label>Password<input name="password" type="password" required minlength="8" autocomplete="${mode === "signup" ? "new-password" : "current-password"}"></label>
           <button class="btn primary" type="submit">${mode === "signup" ? "Create account" : "Sign in"}</button>
           ${mode === "signin" ? `<button type="button" class="btn link" data-act="forgot">Forgot password?</button>` : `<p class="muted small">New accounts start as Owner Relations. A manager can change your role under Team &amp; Roles.</p>`}
@@ -166,6 +164,35 @@ function renderLogin(mode = "signin", msg = "", resendTo = "") {
   </div>`;
 }
 
+// After creating an account (or signing in before confirming), the person types
+// the code from their confirmation email. The link in that email works too.
+function renderVerify(email, msg = "") {
+  app.innerHTML = `
+  <div class="login">
+    <div class="login-art">
+      <div class="brand-mark lg">FF</div>
+      <h1>FF&amp;E Tracker</h1>
+      <p class="tagline">Requests · Inventory · Attic stock</p>
+    </div>
+    <div class="login-card">
+      <h2>Check your email</h2>
+      <p class="muted">We sent a verification code to <b>${esc(email)}</b>. Enter it below to finish creating your account.</p>
+      ${msg ? `<p class="notice">${esc(msg)}</p>` : ""}
+      <form data-form="verify-code" class="stack">
+        <input type="hidden" name="email" value="${esc(email)}">
+        <label>Verification code<input name="code" class="code-input" required inputmode="numeric" autocomplete="one-time-code"
+          pattern="[0-9]{6,10}" maxlength="10" placeholder="••••••" aria-describedby="code-help"></label>
+        <button class="btn primary" type="submit">Verify &amp; sign in</button>
+      </form>
+      <p class="muted small" id="code-help">Can't find it? Check Junk and the Other tab, or wait a minute. The code expires after an hour.</p>
+      <div class="btn-row">
+        <button type="button" class="btn small" data-act="resend-confirm" data-email="${esc(email)}">Send a new code</button>
+        <button type="button" class="btn link" data-act="login-tab" data-mode="signin">Back to sign in</button>
+      </div>
+    </div>
+  </div>`;
+  app.querySelector(".code-input")?.focus();
+}
 
 // Shown after someone opens an invite or password-reset email.
 function renderSetPassword(msg = "") {
@@ -770,7 +797,7 @@ const CLICK = {
   "demo-reset"() { store.resetDemo(); toast("Demo data reset"); renderLogin(); },
   "login-tab"(el) { renderLogin(el.dataset.mode); },
   async "resend-confirm"(el) {
-    await guard(() => store.resendConfirmation(el.dataset.email), `Confirmation email sent to ${el.dataset.email}`);
+    await guard(() => store.resendConfirmation(el.dataset.email), `New code sent to ${el.dataset.email}`);
   },
   async forgot() {
     const email = app.querySelector('input[name="email"]')?.value.trim();
@@ -905,17 +932,26 @@ const SUBMIT = {
       startApp(true);
     } catch (e) {
       if (/not confirmed/i.test(e.message)) {
-        renderLogin("signin", "Your email isn't confirmed yet. Click the link in the confirmation email (check Junk too), then sign in.", email);
+        renderVerify(email, "Your email isn't verified yet. Enter the code from your confirmation email, or send a new one.");
       } else toast(e.message || "Couldn't sign in", "err");
     }
   },
   async signup(form) {
     const fd = new FormData(form);
     const res = await guard(() => store.signUp(String(fd.get("name")).trim(), String(fd.get("email")).trim(), String(fd.get("password"))));
-    if (res === null) renderLogin("signin", "Account created. Check your email (and Junk) to confirm it, then sign in.", String(fd.get("email")).trim());
+    if (res === null) renderVerify(String(fd.get("email")).trim());
     else if (res) { S.me = res; startApp(true); }
   },
   request(form) { submitRequest(form); },
+  async "verify-code"(form) {
+    const fd = new FormData(form);
+    const code = String(fd.get("code")).replace(/\D/g, "");
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    const me = await guard(() => store.verifyEmailCode(String(fd.get("email")), code), "Email verified. Welcome!");
+    btn.disabled = false;
+    if (me) { S.me = me; startApp(true); }
+  },
   async "set-password"(form) {
     const fd = new FormData(form);
     const pw = String(fd.get("password"));
