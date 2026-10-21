@@ -2,7 +2,7 @@
 // Zapier flow, or the app's "Paste an email" box), reads them into request
 // fields, checks for duplicates, and files them under Email Requests.
 //
-// Needs in Netlify: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, INBOUND_EMAIL_SECRET.
+// Needs in Netlify: SUPABASE_URL, SUPABASE_SECRET_KEY, INBOUND_EMAIL_SECRET.
 // ANTHROPIC_API_KEY is optional; without it the built-in reader is used.
 import Anthropic from "@anthropic-ai/sdk";
 import { adminClient, callerProfile, json } from "../lib/server.mjs";
@@ -126,7 +126,7 @@ async function extractWithAI(email, candidates, today) {
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "Use POST" }, 405);
   const admin = adminClient();
-  if (!admin) return json({ error: "Email intake isn't set up yet (SUPABASE_SERVICE_ROLE_KEY missing in Netlify)" }, 503);
+  if (!admin) return json({ error: "Email intake isn't set up yet (SUPABASE_SECRET_KEY missing in Netlify)" }, 503);
 
   // Either a mail service presenting the shared secret, or a signed-in staff member pasting an email.
   const url = new URL(req.url);

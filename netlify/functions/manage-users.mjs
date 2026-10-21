@@ -1,5 +1,5 @@
 // Managers invite people by email, re-send invites, and remove people.
-// Needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Netlify.
+// Needs SUPABASE_URL and SUPABASE_SECRET_KEY in Netlify.
 import { adminClient, callerProfile, json } from "../lib/server.mjs";
 
 const ROLES = ["manager", "owner_relations"];
@@ -8,7 +8,7 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "Use POST" }, 405);
   const admin = adminClient();
-  if (!admin) return json({ error: "User admin isn't set up yet (SUPABASE_SERVICE_ROLE_KEY missing in Netlify)" }, 503);
+  if (!admin) return json({ error: "User admin isn't set up yet (SUPABASE_SECRET_KEY missing in Netlify)" }, 503);
   const caller = await callerProfile(admin, req);
   if (!caller) return json({ error: "Please sign in again" }, 401);
   if (caller.role !== "manager") return json({ error: "Only managers can manage users" }, 403);

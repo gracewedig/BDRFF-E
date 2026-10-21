@@ -8,7 +8,8 @@ export const json = (body, status = 200) =>
 // the service role key must never be put in the website code.
 export function adminClient() {
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Supabase's newer name (secret key) or the older one (service_role).
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) return null;
   return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 }
@@ -29,7 +30,7 @@ export async function callerProfile(admin, req) {
 // need the service role key).
 export async function isSignedIn(req) {
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
+  const key = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY;
   if (!url || !key) return process.env.ALLOW_ANON_AI === "true";
   const auth = req.headers.get("authorization") || "";
   if (!auth.startsWith("Bearer ")) return false;

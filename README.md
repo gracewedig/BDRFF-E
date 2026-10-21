@@ -47,8 +47,10 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 | Key | Value | Used for |
 |---|---|---|
 | `SUPABASE_URL` | Project URL | all functions |
-| `SUPABASE_ANON_KEY` | publishable (or anon) key | AI features: checks the person is signed in |
-| `SUPABASE_SERVICE_ROLE_KEY` | secret (or service_role) key | invites, removing users, email intake |
+| `SUPABASE_PUBLISHABLE_KEY` | publishable key (`sb_publishable_…`) | AI features: checks the person is signed in |
+| `SUPABASE_SECRET_KEY` | secret key (`sb_secret_…`) | invites, removing users, email intake |
+
+(The older names `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` also work.)
 | `INBOUND_EMAIL_SECRET` | any long random password you make up | email intake |
 | `ANTHROPIC_API_KEY` | from [console.anthropic.com](https://console.anthropic.com) | AI sheet assistant and smarter email reading (optional) |
 

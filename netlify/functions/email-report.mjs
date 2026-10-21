@@ -1,7 +1,7 @@
 // Outlook FF&E report: reads a batch of someone's recent emails (sent from their
 // browser after they connect Outlook) and pulls out the FF&E requests coming up.
 // Nothing is stored here; the browser builds and keeps the report.
-// Needs ANTHROPIC_API_KEY, SUPABASE_URL and SUPABASE_ANON_KEY in Netlify.
+// Needs ANTHROPIC_API_KEY, SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in Netlify.
 import Anthropic from "@anthropic-ai/sdk";
 import { PRIORITIES } from "../../public/js/fields.js";
 import { isSignedIn, json } from "../lib/server.mjs";
