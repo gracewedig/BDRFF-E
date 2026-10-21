@@ -33,10 +33,12 @@ export const POSSIBLE_THRESHOLD = 0.4;
 
 // Score 0–1 for how likely two requests describe the same need.
 export function similarity(a, b) {
+  // Different project or sub-project means a different need.
   if (a.project && b.project && a.project !== b.project) return { score: 0, reasons: [] };
+  if (a.sub_project && b.sub_project && a.sub_project !== b.sub_project) return { score: 0, reasons: [] };
   let score = 0;
   const reasons = [];
-  if (a.project && a.project === b.project) score += 0.1;
+  if (a.sub_project && a.sub_project === b.sub_project) score += 0.1;
   const ta = normTag(a.ffe_tag);
   if (ta.length >= 3 && ta === normTag(b.ffe_tag)) { score += 0.5; reasons.push("same FF&E tag"); }
   if (overlap(places(a.rooms), places(b.rooms))) { score += 0.25; reasons.push("same room"); }

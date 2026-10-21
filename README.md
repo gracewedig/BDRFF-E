@@ -1,25 +1,32 @@
-# Black Desert Resort — FF&E Tracker
+# FF&E Tracker
 
-A web app for FF&E (furniture, fixtures & equipment) requests, approvals, inventory and attic stock across the resort's projects: **The Terrace, The Cove, Resort Center, Pickleball, and Waterpark**.
+A web app for FF&E (furniture, fixtures & equipment) requests, approvals, inventory and attic stock across resort **projects**, each with its own **sub-projects**:
+
+- **Black Desert Resort**: The Terrace, The Cove, Resort Center, Pickleball, Waterpark
+- **Cornerstone**, **Sweetens Cove**, **Marcella** (managers add their sub-projects in the app)
 
 ## What's in it
 
 | Area | What it does |
 |---|---|
-| **Requests** | Detailed tickets: project, building(s), room(s), what's needed, FF&E tag/spec, quantity, needed-by date, and photos marked *Concept image* or *Proof of damage*. Each gets a number like `BDR-0012`. If someone submits something that's already been requested, the app shows the matching ticket first. |
-| **Email Requests** (separate tab) | Emails sent to an FF&E inbox are read automatically into draft tickets (photos included). Anything already submitted in the app, or already emailed, is filed under **Auto-matched duplicates**, so managers review each request once. Managers turn the rest into tickets with one click. Anyone can also **paste an email**. |
-| **Approvals** (managers) | Approve, or reject with a note, then move work to *In Progress* → *Completed*. The badge counts pending tickets plus emails waiting for review. |
-| **Inventory & Attic Stock** | Clean per-project views (attic stock vs. inventory, low-stock warnings against par levels). **Take out** stock and optionally record where it went (project, building, room, ticket, note), or return/add stock. Every move goes into a movement log. Export to Excel with one tab per project plus the log. |
-| **Import Spreadsheet** (managers) | Upload Excel/CSV for inventory or requests. Rows are sorted into projects by a Project column, the tab name (a tab called “Cove Attic” → The Cove, Attic Stock), or project names in the row. Columns are matched automatically. You preview everything first: new items, items that update existing counts, requests that are already open, and rows that need a project. |
-| **My Action Items** | A private checklist (status, priority, due date, linked ticket, notes). Export your sheet, or a combined workbook with the overall sheet plus your tab. |
-| **Sheet Builder** | Describe a spreadsheet in plain English and the AI assistant builds it. Pin it to your dashboard and export it any time. |
-| **Team & Roles** (managers) | **Invite people by email**, change roles, re-send invites, and **remove people**. Removing someone keeps the requests they submitted on record. |
+| **Projects** | After signing in, everyone picks the project they're working on. Then they click into sub-projects (open requests, inventory, low stock) with **back arrows** and **‹ › arrows** to browse between them. Managers add projects and sub-projects right on these pages. |
+| **Requests** | Detailed tickets: sub-project, building(s), room(s), what's needed, FF&E tag/spec, quantity, needed-by date, and photos marked *Concept image* or *Proof of damage*. Each gets a number like `REQ-0012`. If someone submits something that's already been requested, the app shows the matching ticket first. |
+| **Notes on everything** | Requests, inventory items and emailed requests all have notes. **Hover the note icon to read them**, click to add or edit. |
+| **Follow-ups** | Set a follow-up date and note on any ticket, including rejected or cancelled ones, or on a dismissed email; it can go straight onto your action items. Filters for “Rejected & cancelled” and “Has a follow-up”, plus a dashboard tile for follow-ups due this week. |
+| **Email Requests** (separate tab) | Emails sent to an FF&E inbox become draft tickets automatically (photos included). Anything already submitted, or already emailed, is filed under **Auto-matched duplicates**, so managers review each request once. **Dismissed** emails stay visible with who dismissed them and why, so anyone can follow up, and managers can bring them back or create a ticket anyway. |
+| **My Outlook Report** | **Anyone** can connect their own Outlook. The app reads their recent inbox (in their browser) and reports which FF&E requests are coming up: what's needed when, what's urgent, and whether each one is already a ticket. New ones can be sent to Email Requests with one click; the report can be copied or exported. |
+| **Approvals** (managers) | Approve, or reject with a note, then *In Progress* → *Completed*. Rejected or cancelled tickets can be reopened. |
+| **Inventory & Attic Stock** | Per-sub-project views (attic stock vs. inventory, low-stock warnings against par levels). **Take out** stock and optionally record where it went; return/add stock; full movement log; Excel export with one tab per sub-project. |
+| **Import Spreadsheet** (managers) | Excel/CSV for inventory or requests, sorted into sub-projects by column, tab name or row text, with a full preview first. |
+| **My Action Items & Sheet Builder** | A private checklist, personal/combined Excel exports, and plain-English custom sheets you can pin to your dashboard. |
+| **Team & Roles / Settings** (managers) | Invite people by email, change roles, remove people. Rename, reorder and archive projects and sub-projects; edit the option lists used in forms (categories, storage locations, units). |
+| **How to Use** | A written guide for each part of the app and a **guided walkthrough** that steps through the real screens in order, offered automatically the first time someone signs in. |
 
-**Roles:** *Managers* approve, review emails, manage inventory, import spreadsheets and manage the team. *Owner Relations* see everything, submit requests, take stock out (logged under their name), and keep their own action items. The database enforces these rules, not just the screens.
+**Roles:** *Managers* approve, review emails, manage inventory, import spreadsheets, and manage projects, settings and the team. *Owner Relations* see everything, submit requests, take stock out (logged under their name), add notes and follow-ups, and keep their own action items. The database enforces these rules, not just the screens.
 
 ## Try it first (Demo mode)
 
-With `public/js/config.js` left blank, the app runs in **Demo mode** with sample data: tickets, inventory, and three emails (one new, one auto-matched duplicate, one newsletter that was filtered out). Pick a Manager or Owner Relations user and click around. Demo data lives only in that browser.
+With `public/js/config.js` left blank, the app runs in **Demo mode** with sample data: tickets, inventory, three emails (one new, one auto-matched duplicate, one filtered-out newsletter) and a sample Outlook inbox for the report. Pick a Manager or Owner Relations user and click around. Demo data lives only in that browser.
 
 Preview on your computer: `npx serve public` in this folder, then open the address it prints.
 
@@ -58,7 +65,7 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 3. Invite everyone else from **Team & Roles**.
 4. Optional, recommended once everyone is invited: in Supabase → **Authentication → Providers/Sign In**, turn off “Allow new users to sign up”, and set `ALLOW_SIGNUP: false` in `config.js`, so only invited people can get in.
 
-### 4. Hook up email
+### 4. Hook up the shared FF&E inbox
 Email intake address (shown to managers on the Email Requests tab):
 ```
 https://YOUR-SITE.netlify.app/.netlify/functions/email-inbound?key=YOUR_INBOUND_EMAIL_SECRET
@@ -80,12 +87,26 @@ Pick whichever fits your email:
 
 Each email is checked against open tickets and other waiting emails. Matches go to **Auto-matched duplicates** (with the reason, e.g. “same FF&E tag, same room”), and a manager can click **Not a duplicate** if the app got it wrong. Emails that aren't FF&E requests (newsletters etc.) go to **Dismissed**. The same email delivered twice is only stored once. When someone later submits the same request in the app, the waiting email is filed as its duplicate automatically.
 
+### 5. Let people connect their Outlook (My Outlook Report)
+An IT admin does this once in Microsoft Entra ID (Azure AD), about 10 minutes:
+1. [entra.microsoft.com](https://entra.microsoft.com) → **App registrations → New registration**. Name it “FF&E Tracker”, accounts in *this organizational directory only*.
+2. Under **Redirect URI**, choose **Single-page application (SPA)** and enter `https://YOUR-SITE.netlify.app/auth-redirect.html`.
+3. **API permissions → Add → Microsoft Graph → Delegated → Mail.Read**. Click **Grant admin consent** (or leave it so each person approves for themselves).
+4. Copy the **Application (client) ID** and **Directory (tenant) ID** into `public/js/config.js` as `MS_CLIENT_ID` and `MS_TENANT_ID`, then redeploy.
+
+Each person then clicks **Connect Outlook** on *My Outlook Report*. Mail is read directly from Microsoft into their browser. Only emails that look like FF&E requests (up to 60) are sent to the AI assistant to be read, and nothing is stored unless the person sends an email to Email Requests. Without `ANTHROPIC_API_KEY`, the built-in reader is used instead.
+
 ## Folder layout
 ```
 public/                       the website (what Netlify publishes)
-  index.html, css/styles.css
+  index.html, css/styles.css, auth-redirect.html (Outlook sign-in return page)
   js/config.js                Supabase keys + settings
   js/app.js                   shell, dashboard, requests, approvals, action items, sheet builder
+  js/projects.js              projects → sub-projects pages, back arrows
+  js/notes.js                 notes (hover to read) and follow-ups
+  js/settings.js              projects, sub-projects and option lists
+  js/outlook.js               My Outlook Report
+  js/help.js                  How to Use guide and walkthrough
   js/inventory.js             inventory & attic stock
   js/intake.js                spreadsheet import
   js/email.js                 email requests
@@ -97,10 +118,12 @@ netlify/functions/
   ai-sheet.mjs                AI sheet assistant
   email-inbound.mjs           email intake
   manage-users.mjs            invites and removing users
+  email-report.mjs            reads a person's Outlook emails for their report
 supabase/schema.sql           database, security rules, photo storage
 ```
 
 ## Notes
 - **AI:** uses Claude Opus 5.5 at low effort, a fraction of a cent per email or sheet. Without `ANTHROPIC_API_KEY`, the built-in rules handle emails and sheets instead.
 - **Photos** are resized before upload and stored privately, with view links that expire after an hour.
-- **Spreadsheet tips:** a *Project* column, or one tab per project, gives the cleanest import. Download the templates from the Import page.
+- **Spreadsheet tips:** a *Sub-project* column, or one tab per sub-project, gives the cleanest import. Download the templates from the Import page.
+- **Colors** are light pink and light gray, with a matching dark mode that follows each person's device setting.

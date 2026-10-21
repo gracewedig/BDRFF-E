@@ -1,7 +1,7 @@
 // Spreadsheet intake: read Excel/CSV files, match their columns, sort every row
-// into a project, flag duplicates, then import as inventory or as requests.
+// into a sub-project, flag duplicates, then import as inventory or as requests.
 import { store } from "./store.js";
-import { PROJECTS, STOCK_TYPES, PRIORITIES, matchProject, todayISO, addDaysISO, ticketLabel } from "./fields.js";
+import { AREAS, CURRENT, STOCK_TYPES, PRIORITIES, matchSubProject, todayISO, addDaysISO, ticketLabel } from "./fields.js";
 import { findMatches, DUP_THRESHOLD } from "./dedupe.js";
 import { S, hooks } from "./state.js";
 import { esc, opt, badge, toast, guard, icon } from "./ui.js";
@@ -13,7 +13,7 @@ const TARGETS = {
     label: "Inventory & attic stock",
     fields: [
       { key: "item_name", label: "Item name", required: true, syn: ["item", "item name", "item description", "description", "name", "product", "ffe item", "ff&e item", "furniture"] },
-      { key: "project", label: "Project", syn: ["project", "property", "site", "area", "resort area", "phase"] },
+      { key: "sub_project", label: "Sub-project", syn: ["sub project", "sub-project", "subproject", "project", "area", "property", "site", "resort area", "phase"] },
       { key: "stock_type", label: "Attic stock / inventory", syn: ["stock type", "type", "attic stock", "attic", "inventory type"] },
       { key: "ffe_tag", label: "FF&E tag", syn: ["ff&e tag", "ffe tag", "tag", "tag #", "tag number", "tag no", "item code", "code", "sku", "spec #", "spec number", "item #", "item number"] },
       { key: "category", label: "Category", syn: ["category", "group", "class", "item type", "room type"] },
@@ -30,7 +30,7 @@ const TARGETS = {
     label: "FF&E requests",
     fields: [
       { key: "item_needed", label: "What's needed", required: true, syn: ["what's needed", "whats needed", "item needed", "item", "request", "description", "issue", "need", "item description"] },
-      { key: "project", label: "Project", syn: ["project", "property", "site", "area"] },
+      { key: "sub_project", label: "Sub-project", syn: ["sub project", "sub-project", "subproject", "project", "area", "property", "site"] },
       { key: "buildings", label: "Building(s)", syn: ["building", "buildings", "bldg", "bldgs", "building #", "building number"] },
       { key: "rooms", label: "Room(s)", syn: ["room", "rooms", "room #", "room number", "unit", "unit #", "suite", "location"] },
       { key: "ffe_tag", label: "FF&E tag", syn: ["ff&e tag", "ffe tag", "tag", "tag #", "tag number", "item code", "code", "sku"] },
@@ -136,7 +136,7 @@ const normTag = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 function existingItem(project, v) {
   const tag = normTag(v.ffe_tag);
-  return S.inventory.find((it) => it.project === project && (tag
+  return S.inventory.find((it) => (it.sub_project || "") === project && (tag
     ? normTag(it.ffe_tag) === tag
     : !it.ffe_tag && it.item_name.toLowerCase() === v.item_name.toLowerCase() && String(it.location || "").toLowerCase() === v.location.toLowerCase()));
 }
@@ -147,17 +147,18 @@ function buildRows() {
   const out = [];
   const openRequests = S.requests.filter((r) => !["Rejected", "Cancelled"].includes(r.status));
   for (const sh of imp.sheets) {
-    const sheetProject = matchProject(sh.name);
+    const sheetProject = matchSubProject(sh.name);
     const sheetType = stockTypeFrom(sh.name);
     sh.rows.forEach((raw, i) => {
       const key = `${sh.name}#${i}`;
       const v = {};
       for (const f of fields) v[f.key] = (imp.mapping[f.key] || []).map((h) => clean(raw[h])).find(Boolean) || "";
-      let project = PROJECTS.find((p) => norm(p) === norm(v.project)) || matchProject(v.project);
-      let how = project ? "project column" : "";
+      // "project" here is the sub-project within the project being worked on.
+      let project = AREAS.find((p) => norm(p) === norm(v.sub_project)) || matchSubProject(v.sub_project);
+      let how = project ? "sub-project column" : "";
       if (!project && sheetProject) { project = sheetProject; how = "tab name"; }
       if (!project) {
-        const guess = matchProject(Object.values(raw).join(" "));
+        const guess = matchSubProject(Object.values(raw).join(" "));
         if (guess) { project = guess; how = "row text"; }
       }
       if (!project && imp.defaultProject) { project = imp.defaultProject; how = "default"; }
@@ -170,7 +171,7 @@ function buildRows() {
         v.quantity = num(v.quantity) ?? 0;
         v.min_qty = num(v.min_qty);
         if (!v.item_name) row.issues.push("No item name");
-        const ex = project && v.item_name ? existingItem(project, v) : null;
+        const ex = (project || !AREAS.length) && v.item_name ? existingItem(project, v) : null;
         if (ex) { row.status = "update"; row.existing = ex; row.note = `Updates existing · on hand ${ex.quantity} → ${v.quantity}`; }
       } else {
         v.quantity = Math.max(1, num(v.quantity) ?? 1);
@@ -178,15 +179,15 @@ function buildRows() {
         v.needed_by = parseDate(v.needed_by);
         if (!v.item_needed) row.issues.push("Nothing described");
         if (!v.needed_by) row.note = "No date given · set to 30 days out";
-        if (project && v.item_needed) {
-          const [m] = findMatches({ ...v, project }, openRequests, 1);
+        if ((project || !AREAS.length) && v.item_needed) {
+          const [m] = findMatches({ ...v, sub_project: project }, openRequests, 1);
           if (m && m.score >= DUP_THRESHOLD) {
             row.status = "duplicate";
             row.note = `Already requested: ${ticketLabel(m.item.ticket_no)} (${m.reasons.join(", ")})`;
           }
         }
       }
-      if (!project) row.issues.push("No project");
+      if (!project && AREAS.length) row.issues.push("No sub-project");
       row.include = ov.include !== undefined ? ov.include : !row.issues.length && row.status !== "duplicate";
       if (Object.values(v).some((x) => x !== "" && x != null && x !== 0) || Object.values(raw).some((c) => clean(c))) out.push(row);
     });
@@ -199,11 +200,12 @@ function templateDownload(target) {
   if (target === "inventory") {
     const cols = ["Item Name", "FF&E Tag", "Type (Attic Stock / Inventory)", "Category", "Description / Spec", "Storage Location", "Quantity On Hand", "Unit", "Par Level", "Vendor", "Notes"]
       .map((label) => ({ key: label, label }));
-    downloadWorkbook("BDR Inventory Import Template", PROJECTS.map((p) => ({ name: p, columns: cols, rows: [] })));
+    const tabs = AREAS.length ? AREAS : [CURRENT.project];
+    downloadWorkbook(`${CURRENT.project} Inventory Import Template`, tabs.map((p) => ({ name: p, columns: cols, rows: [] })));
   } else {
-    const cols = ["Project", "Building(s)", "Room(s)", "What's Needed", "FF&E Tag", "Specification", "Quantity", "Priority", "Needed By", "Requested By", "Details"]
+    const cols = ["Sub-project", "Building(s)", "Room(s)", "What's Needed", "FF&E Tag", "Specification", "Quantity", "Priority", "Needed By", "Requested By", "Details"]
       .map((label) => ({ key: label, label }));
-    downloadWorkbook("BDR Request Import Template", [{ name: "Requests", columns: cols, rows: [] }]);
+    downloadWorkbook(`${CURRENT.project} Request Import Template`, [{ name: "Requests", columns: cols, rows: [] }]);
   }
 }
 
@@ -213,21 +215,21 @@ export function pageImport() {
     return `
     <div class="card intake-start">
       <h3>${icon("import")} Import a spreadsheet</h3>
-      <p class="muted">Upload an Excel (.xlsx, .xls) or CSV file. Rows are sorted into <b>The Terrace, The Cove, Resort Center, Pickleball or Waterpark</b> using a Project column, the tab name (e.g. a tab called “Cove”), or project names written in the row. You review everything before it's saved.</p>
+      <p class="muted">Upload an Excel (.xlsx, .xls) or CSV file to bring it into <b>${esc(CURRENT.project)}</b>.${AREAS.length ? ` Rows are sorted into its sub-projects (<b>${esc(AREAS.join(", "))}</b>) using a Sub-project column, the tab name (e.g. a tab called “Cove”), or sub-project names written in the row.` : ""} You review everything before it's saved.</p>
       <label class="drop">
         ${icon("import", "ico lg")}
         <span>Choose a spreadsheet</span>
         <input type="file" accept=".xlsx,.xls,.xlsm,.csv" data-change="imp-file">
       </label>
       <p class="muted small">Need a starting point? Download a template:
-        <button class="link-btn accent" data-act="imp-template" data-target="inventory">Inventory (one tab per project)</button> ·
+        <button class="link-btn accent" data-act="imp-template" data-target="inventory">Inventory${AREAS.length ? " (one tab per sub-project)" : ""}</button> ·
         <button class="link-btn accent" data-act="imp-template" data-target="requests">Requests</button></p>
     </div>`;
   }
   const t = TARGETS[imp.target];
   const rows = imp.rows;
   const inc = rows.filter((r) => r.include);
-  const byProject = [...PROJECTS, ""].map((p) => [p, rows.filter((r) => r.project === p).length]).filter(([, n]) => n);
+  const byProject = AREAS.length ? [...AREAS, ""].map((p) => [p, rows.filter((r) => r.project === p).length]).filter(([, n]) => n) : [];
   const counts = {
     new: rows.filter((r) => r.status === "new" && !r.issues.length).length,
     update: rows.filter((r) => r.status === "update").length,
@@ -249,7 +251,7 @@ export function pageImport() {
   <div class="card">
     <div class="row3">
       <label>Import into<select data-change="imp-target">${Object.entries(TARGETS).map(([k, x]) => opt(k, x.label, imp.target === k)).join("")}</select></label>
-      <label>Rows with no project go to<select data-change="imp-default-project">${opt("", "Nowhere — I'll pick")}${PROJECTS.map((p) => opt(p, p, imp.defaultProject === p)).join("")}</select></label>
+      ${AREAS.length ? `<label>Rows with no sub-project go to<select data-change="imp-default-project">${opt("", "Nowhere — I'll pick")}${AREAS.map((p) => opt(p, p, imp.defaultProject === p)).join("")}</select></label>` : `<label>Project<input value="${esc(CURRENT.project)}" disabled></label>`}
       ${imp.target === "inventory" ? `<label>Type when the sheet doesn't say<select data-change="imp-default-type">${STOCK_TYPES.map((s) => opt(s, s, imp.defaultStockType === s)).join("")}</select></label>` : "<span></span>"}
     </div>
     <details ${Object.keys(imp.mapping).length < 2 ? "open" : ""}>
@@ -264,7 +266,7 @@ export function pageImport() {
   </div>
 
   <div class="imp-summary">
-    ${byProject.map(([p, n]) => `<span class="pill ${p ? "" : "warn"}">${esc(p || "No project")} <b>${n}</b></span>`).join("")}
+    ${byProject.map(([p, n]) => `<span class="pill ${p ? "" : "warn"}">${esc(p || "No sub-project")} <b>${n}</b></span>`).join("")}
     <span class="grow"></span>
     ${counts.new ? `<span class="pill ok">New <b>${counts.new}</b></span>` : ""}
     ${counts.update ? `<span class="pill info">Updates <b>${counts.update}</b></span>` : ""}
@@ -274,12 +276,12 @@ export function pageImport() {
 
   <div class="card flush">
     <div class="table-wrap"><table class="grid imp-grid">
-      <thead><tr><th><input type="checkbox" data-change="imp-all" ${inc.length === rows.length ? "checked" : ""} aria-label="Select all"></th><th>Project</th>${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}<th>Status</th></tr></thead>
+      <thead><tr><th><input type="checkbox" data-change="imp-all" ${inc.length === rows.length ? "checked" : ""} aria-label="Select all"></th>${AREAS.length ? "<th>Sub-project</th>" : ""}${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}<th>Status</th></tr></thead>
       <tbody>${shown.map((r, i) => `
         <tr class="${r.include ? "" : "off"}">
           <td><input type="checkbox" data-change="imp-include" data-idx="${i}" ${r.include ? "checked" : ""} aria-label="Include row"></td>
-          <td data-label="Project"><select data-change="imp-row-project" data-idx="${i}" class="${r.project ? "" : "invalid"}">${opt("", "Choose…")}${PROJECTS.map((p) => opt(p, p, r.project === p)).join("")}</select>
-            ${r.how && r.how !== "set by you" ? `<div class="muted tiny">from ${esc(r.how)}</div>` : ""}</td>
+          ${AREAS.length ? `<td data-label="Sub-project"><select data-change="imp-row-project" data-idx="${i}" class="${r.project ? "" : "invalid"}">${opt("", "Choose…")}${AREAS.map((p) => opt(p, p, r.project === p)).join("")}</select>
+            ${r.how && r.how !== "set by you" ? `<div class="muted tiny">from ${esc(r.how)}</div>` : ""}</td>` : ""}
           ${cols.map(([k, l]) => `<td data-label="${esc(l)}">${esc(r.v[k])}</td>`).join("")}
           <td data-label="Status">${r.issues.length ? badge(r.issues.join(", "), "rejected") : r.status === "update" ? badge("Update", "approved") : r.status === "duplicate" ? badge("Duplicate", "pending") : badge("New", "completed")}
             ${r.note ? `<div class="muted tiny">${esc(r.note)}</div>` : ""}</td>
@@ -296,14 +298,14 @@ export function pageImport() {
 
 async function runImport() {
   const imp = S.imp;
-  const rows = imp.rows.filter((r) => r.include && !r.issues.length && r.project);
+  const rows = imp.rows.filter((r) => r.include && !r.issues.length && (r.project || !AREAS.length));
   if (!rows.length) return;
   imp.busy = true;
   hooks.render();
   if (imp.target === "inventory") {
     const fresh = [], updates = [];
     for (const r of rows) {
-      const v = { ...r.v, project: r.project };
+      const v = { ...r.v, sub_project: r.project || null };
       const item = Object.fromEntries(Object.entries(v).filter(([, x]) => x !== "" && x != null));
       if (r.existing) updates.push({ ...r.existing, ...item, id: r.existing.id });
       else fresh.push({ unit: "ea", ...item, quantity: v.quantity, stock_type: v.stock_type });
@@ -317,7 +319,7 @@ async function runImport() {
   } else {
     const later = addDaysISO(todayISO(), 30);
     const payload = rows.map((r) => ({
-      project: r.project, buildings: r.v.buildings || "TBD", rooms: r.v.rooms || "TBD", item_needed: r.v.item_needed,
+      sub_project: r.project || null, buildings: r.v.buildings || "TBD", rooms: r.v.rooms || "TBD", item_needed: r.v.item_needed,
       ffe_tag: r.v.ffe_tag || "TBD", spec: r.v.spec, quantity: r.v.quantity, priority: r.v.priority,
       needed_by: r.v.needed_by || later, details: r.v.details, source: "import", status: "Pending",
       ...(r.v.requester_name ? { requester_name: r.v.requester_name } : {}),

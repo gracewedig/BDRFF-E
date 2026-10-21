@@ -2,7 +2,8 @@
 // (columns, filters, sort, grouping) over the FF&E request list.
 // Requires the ANTHROPIC_API_KEY environment variable in Netlify.
 import Anthropic from "@anthropic-ai/sdk";
-import { FIELDS, FIELD_KEYS, OPS, OP_KEYS, PROJECTS, STATUSES, PRIORITIES } from "../../public/js/fields.js";
+import { FIELDS, FIELD_KEYS, OPS, OP_KEYS, AREAS, STATUSES, PRIORITIES } from "../../public/js/fields.js";
+import { isSignedIn, projectsFrom, json } from "../lib/server.mjs";
 
 const client = new Anthropic();
 
@@ -33,7 +34,7 @@ const SPEC_SCHEMA = {
   },
 };
 
-const SYSTEM = `You build custom spreadsheet views for the Black Desert Resort FF&E (furniture, fixtures & equipment) tracker.
+const systemPrompt = () => `You build custom spreadsheet views for the Black Desert Resort FF&E (furniture, fixtures & equipment) tracker.
 Each row is one FF&E request. You never see the data; you only return a view definition that the app applies.
 
 Columns (key: label, type):
@@ -44,7 +45,7 @@ ${Object.entries(OPS).map(([k, v]) => `- ${k}: ${v}`).join("\n")}
 
 Rules:
 - All filters are combined with AND. For "A or B" on one field use op "in" with a comma-separated value, e.g. "The Cove, The Terrace".
-- Enum values must be spelled exactly: projects ${PROJECTS.join(", ")}; statuses ${STATUSES.join(", ")}; priorities ${PRIORITIES.join(", ")}.
+- Enum values must be spelled exactly: sub-projects ${AREAS.join(", ") || "(none)"}; statuses ${STATUSES.join(", ")}; priorities ${PRIORITIES.join(", ")}.
 - "Open" means status in Pending, Approved, In Progress.
 - Dates are YYYY-MM-DD. Resolve relative dates ("this month", "next week") against today's date. Use due_within_days (value = number of days) for "due in the next N days" and overdue (field needed_by, empty value) for late items.
 - is_me (field requester_name, empty value) means requests submitted by the person asking ("my requests").
@@ -53,18 +54,6 @@ Rules:
 - Use group_by "none" unless the user asks to group/organize by something.
 - If a current view is provided, modify it according to the request instead of starting over.`;
 
-const json = (body, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-
-async function isSignedIn(req) {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return process.env.ALLOW_ANON_AI === "true";
-  const auth = req.headers.get("authorization") || "";
-  if (!auth.startsWith("Bearer ")) return false;
-  const res = await fetch(`${url.replace(/\/$/, "")}/auth/v1/user`, { headers: { apikey: key, authorization: auth } });
-  return res.ok;
-}
 
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "Use POST" }, 405);
@@ -74,6 +63,9 @@ export default async (req) => {
   let body;
   try { body = await req.json(); } catch { return json({ error: "Invalid request" }, 400); }
   const prompt = String(body.prompt || "").trim().slice(0, 2000);
+  // Sub-projects of the project the person is working in (managers can add more).
+  AREAS.length = 0;
+  AREAS.push(...projectsFrom(body.subprojects));
   if (!prompt) return json({ error: "Describe the sheet you want" }, 400);
   const today = /^\d{4}-\d{2}-\d{2}$/.test(body.today || "") ? body.today : new Date().toISOString().slice(0, 10);
 
@@ -90,7 +82,7 @@ export default async (req) => {
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
       output_config: { effort: "low", format: { type: "json_schema", schema: SPEC_SCHEMA } },
-      system: SYSTEM,
+      system: systemPrompt(),
       messages: [{ role: "user", content: userText }],
     });
     if (response.stop_reason === "refusal") return json({ error: "The assistant couldn't build that sheet" }, 422);

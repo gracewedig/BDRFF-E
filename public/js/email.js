@@ -2,16 +2,17 @@
 // duplicates of existing tickets (or of earlier emails) filed away automatically.
 import { store } from "./store.js";
 import { CONFIG } from "./config.js";
-import { PROJECTS, PRIORITIES, PHOTO_KINDS, ticketLabel } from "./fields.js";
+import { AREAS, CURRENT, PRIORITIES, PHOTO_KINDS, ticketLabel } from "./fields.js";
 import { findMatches, DUP_THRESHOLD, POSSIBLE_THRESHOLD } from "./dedupe.js";
 import { S, isManager, hooks } from "./state.js";
-import { modalRoot, esc, opt, badge, fmtDate, toast, guard, icon, openModal } from "./ui.js";
+import { modalRoot, esc, opt, badge, fmtDate, toast, guard, icon, openModal, notesChip } from "./ui.js";
+import { followUpBanner } from "./notes.js";
 
 const TABS = [
   ["New", "Needs review"],
   ["Duplicate", "Auto-matched duplicates"],
   ["Converted", "Turned into tickets"],
-  ["Dismissed", "Dismissed"],
+  ["Dismissed", "Dismissed (follow up)"],
 ];
 const emailById = (id) => S.emails.find((e) => e.id === id);
 const requestById = (id) => S.requests.find((r) => r.id === id);
@@ -28,7 +29,7 @@ function possibleMatch(e) {
 function fieldsHTML(e) {
   const f = (label, v, required) => `<div><dt>${esc(label)}</dt><dd class="${!v && required ? "missing" : ""}">${v ? esc(v) : required ? "missing" : "—"}</dd></div>`;
   return `<dl class="facts compact">
-    ${f("Project", e.project, true)}${f("Building(s)", e.buildings, true)}${f("Room(s)", e.rooms, true)}
+    ${AREAS.length ? f("Sub-project", e.sub_project, true) : ""}${f("Building(s)", e.buildings, true)}${f("Room(s)", e.rooms, true)}
     ${f("FF&E tag", e.ffe_tag, true)}${f("Qty", e.quantity)}${f("Needed by", e.needed_by ? fmtDate(e.needed_by) : "", true)}
     ${e.priority && e.priority !== "Normal" ? f("Priority", e.priority) : ""}
   </dl>`;
@@ -57,20 +58,24 @@ function cardHTML(e) {
       <span class="muted small">${esc(e.reviewer_name || "")} · ${esc(when(e.reviewed_at))}</span></div>
       ${converted ? `<button class="btn small" data-act="open-request" data-id="${esc(converted.id)}">Open ticket</button>` : ""}</div>`;
   } else if (e.status === "Dismissed") {
-    callout = `<div class="callout">${esc(e.duplicate_reason || "Dismissed")}${e.reviewer_name ? ` · ${esc(e.reviewer_name)}` : ""}
-      ${mgr ? `<button class="btn small" data-act="em-restore" data-id="${esc(e.id)}">Restore</button>` : ""}</div>`;
+    callout = `<div class="callout"><div><b>Dismissed${e.reviewer_name ? ` by ${esc(e.reviewer_name)}` : " automatically"}</b>
+      <span class="muted small">${esc(e.duplicate_reason || "")}${e.reviewed_at ? ` · ${esc(when(e.reviewed_at))}` : ""}</span></div>
+      <div class="btn-row">${e.follow_up_on ? "" : `<button class="btn small" data-act="follow-up" data-table="email_requests" data-id="${esc(e.id)}">Follow up</button>`}
+      ${mgr ? `<button class="btn small" data-act="em-restore" data-id="${esc(e.id)}">Back to review</button>
+      <button class="btn small primary" data-act="em-review" data-id="${esc(e.id)}">Create ticket anyway</button>` : ""}</div></div>`;
   }
   return `
   <article class="email-card">
     <header>
       <span class="avatar sm">${icon("email", "ico xs")}</span>
-      <div class="grow"><strong>${esc(e.from_name || e.from_email || "Unknown sender")}</strong> <span class="muted small">${esc(e.from_email && e.from_name ? e.from_email : "")}</span>
+      <div class="grow"><span class="item-line"><strong>${esc(e.from_name || e.from_email || "Unknown sender")}</strong>${notesChip("email_requests", e)}</span> <span class="muted small">${esc(e.from_email && e.from_name ? e.from_email : "")}</span>
         <div class="email-subject">${esc(e.subject || "(no subject)")}</div></div>
       <span class="muted small nowrap">${esc(when(e.received_at))}</span>
     </header>
     <p class="email-need"><b>${esc(e.item_needed || "—")}</b>${e.attachments?.length ? ` <span class="muted small">· ${e.attachments.length} photo${e.attachments.length === 1 ? "" : "s"}</span>` : ""}</p>
     ${fieldsHTML(e)}
     ${callout}
+    ${followUpBanner("email_requests", e)}
     <details class="email-body"><summary>Original email${e.ai_summary ? ` · <span class="muted">${esc(e.ai_summary)}</span>` : ""}</summary><pre>${esc(e.body || "")}</pre></details>
     ${mgr && e.status === "New" ? `<footer class="btn-row end">
       <button class="btn small" data-act="em-dismiss" data-id="${esc(e.id)}">Dismiss</button>
@@ -124,7 +129,8 @@ async function openReview(id) {
     <details class="email-body"><summary>Original email: ${esc(e.subject || "")}</summary><pre>${esc(e.body || "")}</pre></details>
     <form class="stack" data-form="em-convert">
       <input type="hidden" name="id" value="${esc(e.id)}">
-      <div class="chip-select">${PROJECTS.map((p) => `<label class="chip"><input type="radio" name="project" value="${esc(p)}" ${e.project === p ? "checked" : ""}><span>${esc(p)}</span></label>`).join("")}</div>
+      <p class="muted small">Project: <b>${esc(e.project || CURRENT.project)}</b>${AREAS.length ? " · choose the sub-project" : ""}</p>
+      ${AREAS.length ? `<div class="chip-select">${AREAS.map((p) => `<label class="chip"><input type="radio" name="sub_project" value="${esc(p)}" ${e.sub_project === p ? "checked" : ""}><span>${esc(p)}</span></label>`).join("")}</div>` : ""}
       <div class="row2"><label>Building(s) <em>*</em><input name="buildings" value="${esc(e.buildings || "")}"></label>
         <label>Room(s) <em>*</em><input name="rooms" value="${esc(e.rooms || "")}"></label></div>
       <label>What's needed <em>*</em><textarea name="item_needed" rows="2">${esc(e.item_needed || "")}</textarea></label>
@@ -159,11 +165,11 @@ async function convert(form, mode) {
   const e = emailById(fd.get("id"));
   const v = (k) => String(fd.get(k) || "").trim();
   const fields = {
-    project: v("project"), buildings: v("buildings"), rooms: v("rooms"), item_needed: v("item_needed"), ffe_tag: v("ffe_tag"),
+    project: e.project || CURRENT.project, sub_project: v("sub_project"), buildings: v("buildings"), rooms: v("rooms"), item_needed: v("item_needed"), ffe_tag: v("ffe_tag"),
     spec: v("spec"), quantity: Math.max(1, parseInt(v("quantity"), 10) || 1), priority: v("priority") || "Normal",
     needed_by: v("needed_by"), details: v("details"),
   };
-  const missing = ["project", "buildings", "rooms", "item_needed", "ffe_tag", "needed_by"].filter((k) => !fields[k]);
+  const missing = [...(AREAS.length ? ["sub_project"] : []), "buildings", "rooms", "item_needed", "ffe_tag", "needed_by"].filter((k) => !fields[k]);
   if (missing.length) {
     form.querySelector("#convert-error").textContent = `Please fill in: ${missing.map((k) => k.replace("_", " ")).join(", ")} (type TBD if unknown).`;
     return;

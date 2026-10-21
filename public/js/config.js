@@ -12,6 +12,11 @@ export const CONFIG = {
   AI_ENDPOINT: "/.netlify/functions/ai-sheet",
   EMAIL_ENDPOINT: "/.netlify/functions/email-inbound",
   USERS_ENDPOINT: "/.netlify/functions/manage-users",
+  REPORT_ENDPOINT: "/.netlify/functions/email-report",
+  // Outlook connection (My Outlook Report). Register the app in Microsoft Entra ID
+  // and paste its Application (client) ID and Directory (tenant) ID; see README.
+  MS_CLIENT_ID: "",
+  MS_TENANT_ID: "organizations",
   // Show "Create account" on the sign-in page. Set to false once managers invite
   // everyone by email (and turn off sign-ups in Supabase, see README).
   ALLOW_SIGNUP: true,

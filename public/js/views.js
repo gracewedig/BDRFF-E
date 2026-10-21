@@ -2,8 +2,8 @@
 // over the overall request list. Specs come from the AI assistant, the offline
 // builder below, or manual edits in the Sheet Builder.
 import {
-  FIELDS, FIELD_KEYS, FIELD_MAP, OP_KEYS, VALUELESS_OPS, DEFAULT_COLUMNS, PROJECTS, STATUSES,
-  OPEN_STATUSES, PRIORITIES, PROJECT_PATTERNS, toRow, todayISO, addDaysISO, isOverdue,
+  FIELDS, FIELD_KEYS, FIELD_MAP, OP_KEYS, VALUELESS_OPS, DEFAULT_COLUMNS, AREAS, STATUSES,
+  OPEN_STATUSES, PRIORITIES, subProjectPattern, toRow, todayISO, addDaysISO, isOverdue,
 } from "./fields.js";
 
 export function defaultSpec() {
@@ -77,7 +77,7 @@ function compare(a, b, type) {
 const ORDER = {
   priority: ["Urgent", "High", "Normal", "Low"],
   status: STATUSES,
-  project: PROJECTS,
+  sub_project: AREAS,
 };
 
 export function applyView(rawSpec, requests, me) {
@@ -110,8 +110,8 @@ export function localSpecFromPrompt(prompt) {
   const filters = [];
   const notes = [];
 
-  const projects = PROJECTS.filter((x) => PROJECT_PATTERNS[x].test(p));
-  if (projects.length) { filters.push({ field: "project", op: "in", value: projects.join(", ") }); notes.push(projects.join(" / ")); }
+  const projects = AREAS.filter((x) => subProjectPattern(x).test(p));
+  if (projects.length) { filters.push({ field: "sub_project", op: "in", value: projects.join(", ") }); notes.push(projects.join(" / ")); }
 
   const statusWords = {
     Pending: /pending|awaiting approval|needs? approval|unapproved/, Approved: /\bapproved\b/,
@@ -142,9 +142,9 @@ export function localSpecFromPrompt(prompt) {
   const tag = p.match(/tag\s*#?\s*([a-z0-9-]*\d[a-z0-9-]*)/);
   if (tag) filters.push({ field: "ffe_tag", op: "contains", value: tag[1] });
 
-  const by = p.match(/(?:group(?:ed)? by|by|per)\s+(project|status|building|priority|requester|person|room)/);
+  const by = p.match(/(?:group(?:ed)? by|by|per)\s+(sub-?project|project|area|status|building|priority|requester|person|room)/);
   if (by) {
-    const key = { project: "project", status: "status", building: "buildings", priority: "priority", requester: "requester_name", person: "requester_name", room: "rooms" }[by[1]];
+    const key = { project: "sub_project", "sub-project": "sub_project", subproject: "sub_project", area: "sub_project", status: "status", building: "buildings", priority: "priority", requester: "requester_name", person: "requester_name", room: "rooms" }[by[1]];
     spec.group_by = key;
   }
   if (/newest|most recent|latest|recently submitted/.test(p)) { spec.sort_field = "created_at"; spec.sort_dir = "desc"; }
@@ -166,6 +166,6 @@ export function localSpecFromPrompt(prompt) {
   spec.filters = filters;
   spec.explanation = filters.length || spec.group_by !== "none"
     ? `Built with the offline builder${notes.length ? ": " + notes.join(", ") : ""}. Adjust anything below.`
-    : "The offline builder didn't find specific filters, so this shows everything. Try naming a project, status, building, or date range.";
+    : "The offline builder didn't find specific filters, so this shows everything. Try naming a sub-project, status, building, or date range.";
   return sanitizeSpec(spec);
 }

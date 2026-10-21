@@ -1,7 +1,7 @@
 // Rule-based reader that pulls request details out of an email. The intake
 // function prefers the AI assistant and uses this when no API key is set; Demo
 // mode always uses it.
-import { PRIORITIES, matchProject, todayISO } from "./fields.js";
+import { PRIORITIES, matchLocation, todayISO } from "./fields.js";
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const LIST = String.raw`[\w-]+(?:\s*(?:,|&|and|\/)\s*[\w-]*\d[\w-]*)*`; // later items need a number ("89, 90", not "89, room")
@@ -49,7 +49,8 @@ export function stripQuoted(text) {
   return out.join("\n").trim();
 }
 
-export function parseEmailHeuristic({ subject = "", text = "" }, today = todayISO()) {
+// `hint`: the project to assume when the email only names a sub-project ambiguously.
+export function parseEmailHeuristic({ subject = "", text = "", hint = "" }, today = todayISO()) {
   const body = stripQuoted(text);
   const all = `${subject}\n${body}`;
   const subj = clean(subject.replace(/^((re|fw|fwd)\s*:\s*)+/i, ""));
@@ -66,18 +67,19 @@ export function parseEmailHeuristic({ subject = "", text = "" }, today = todayIS
 
   const firstSentence = clean(body.split(/\n\s*\n|(?<=[.!?])\s/)[0] || "").replace(/^(hi|hello|hey|good (morning|afternoon))[^,]*,\s*/i, "");
   const item = subj && !/^(request|ffe|ff&e|help|question|hi|hello)$/i.test(subj) ? subj : firstSentence;
-  const hasSignal = /\b(need|needs|replace|repair|broken|damaged?|missing|order|request|stain|torn|crack|leak|install)/i.test(all);
-  const project = matchProject(all);
+  const hasSignal = /\b(need|needs|replace|repair|fix|broke|broken|damaged?|missing|order|request|stain|torn|rip|ripped|crack|leak|install|would like|we'd like|urgent)/i.test(all);
+  const { project, sub_project } = matchLocation(all, hint);
   // "Building: Cabana row." keeps the whole label; "bldg 89 and 90" keeps the list.
-  const labelled = (word) => pick(new RegExp(String.raw`\b(?:${word})\s*:\s*([^\n.;]{1,60})`, "i"));
+  const labelled = (word) => pick(new RegExp(String.raw`\b(?:${word})[ \t]*:[ \t]*([^\n.;]{1,60})`, "i"));
   const rooms = labelled("rooms?|rm|units?|suites?")
-    || pick(new RegExp(String.raw`\b(?:rooms?|rm|units?|suites?)\.?\s*#?\s*(${LIST})`, "i"))
+    || pick(new RegExp(String.raw`\b(?:rooms?|rm|units?|suites?)\.?[ \t]*#?[ \t]*(${LIST})`, "i"))
     || pick(/\b(cabanas?\s*#?\s*\d[\w-]*)/i);
   const buildings = labelled("buildings?|bldgs?")
-    || pick(new RegExp(String.raw`\b(?:buildings?|bldgs?)\.?\s*#?\s*(${LIST})`, "i"));
+    || pick(new RegExp(String.raw`\b(?:buildings?|bldgs?)\.?[ \t]*#?[ \t]*(${LIST})`, "i"));
 
   return {
     project,
+    sub_project,
     buildings: buildings.replace(/\s+(and|&)\s+/gi, ", "),
     rooms: rooms.replace(/\s+(and|&)\s+/gi, ", "),
     item_needed: item.slice(0, 300),
@@ -88,7 +90,7 @@ export function parseEmailHeuristic({ subject = "", text = "" }, today = todayIS
     needed_by: findDate(all, today),
     details: body.slice(0, 4000),
     photo_kind: /damag|broken|crack|stain|torn|\brip|leak|missing|scratch|chip/i.test(all) ? "damage" : "concept",
-    is_request: hasSignal || !!(project && (rooms || tag)),
+    is_request: hasSignal || !!(sub_project && (rooms || tag)),
     summary: "Read with the built-in email reader.",
   };
 }

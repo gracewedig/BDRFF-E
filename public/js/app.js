@@ -1,7 +1,7 @@
 import { store } from "./store.js";
 import { CONFIG } from "./config.js";
 import {
-  PROJECTS, STATUSES, OPEN_STATUSES, CLOSED_STATUSES, PRIORITIES, ACTION_STATUSES, PHOTO_KINDS, FIELDS, FIELD_MAP,
+  PROJECTS, AREAS, CURRENT, applySettings, setCurrentProject, STATUSES, OPEN_STATUSES, CLOSED_STATUSES, PRIORITIES, ACTION_STATUSES, PHOTO_KINDS, FIELDS, FIELD_MAP,
   OPS, VALUELESS_OPS, toRow, todayISO, ticketLabel, isOverdue,
 } from "./fields.js";
 import { applyView, defaultSpec, sanitizeSpec, localSpecFromPrompt } from "./views.js";
@@ -13,8 +13,17 @@ import * as inventory from "./inventory.js";
 import * as intake from "./intake.js";
 import * as email from "./email.js";
 import * as team from "./team.js";
+import * as projects from "./projects.js";
+import * as notes from "./notes.js";
+import { notesBlock, followUpBanner, followUpsDue } from "./notes.js";
+import * as settings from "./settings.js";
+import * as outlook from "./outlook.js";
+import * as help from "./help.js";
 
+// `global` pages work before a project is chosen; the rest need one.
 const NAV = [
+  { id: "projects", label: "All Projects", global: true },
+  { id: "project", label: "Project Home" },
   { id: "dashboard", label: "Dashboard" },
   { id: "requests", label: "All Requests" },
   { id: "email", label: "Email Requests", badge: "email" },
@@ -22,21 +31,32 @@ const NAV = [
   { id: "approvals", label: "Approvals", manager: true, badge: "pending" },
   { id: "inventory", label: "Inventory & Attic Stock" },
   { id: "import", label: "Import Spreadsheet", manager: true },
-  { id: "actions", label: "My Action Items" },
+  { id: "actions", label: "My Action Items", global: true },
   { id: "builder", label: "Sheet Builder" },
-  { id: "team", label: "Team & Roles", manager: true },
+  { id: "outlook", label: "My Outlook Report", global: true },
+  { id: "team", label: "Team & Roles", manager: true, global: true },
+  { id: "settings", label: "Settings", manager: true, global: true },
+  { id: "help", label: "How to Use", global: true },
 ];
+const NAV_ICON = { project: "dashboard", projects: "inventory", outlook: "outlook", settings: "settings", help: "help" };
 const TITLES = {
-  dashboard: "Dashboard", requests: "All Requests", email: "Email Requests", new: "New FF&E Request", approvals: "Approval Queue",
-  inventory: "Inventory & Attic Stock", import: "Import Spreadsheet", actions: "My Action Items", builder: "Custom Sheet Builder",
-  team: "Team & Roles",
+  projects: "Projects", dashboard: "Dashboard", requests: "All Requests", email: "Email Requests", new: "New FF&E Request",
+  approvals: "Approval Queue", inventory: "Inventory & Attic Stock", import: "Import Spreadsheet", actions: "My Action Items",
+  builder: "Custom Sheet Builder", outlook: "My Outlook FF&E Report", team: "Team & Roles", settings: "Settings", help: "How to Use",
 };
-const MODULES = [inventory, intake, email, team];
+const title = (route) => (route === "project" ? CURRENT.project : route === "area" ? S.areaName : TITLES[route]);
+const MODULES = [inventory, intake, email, team, projects, notes, settings, outlook, help];
 
 function routeFromHash() {
-  const r = location.hash.replace(/^#\/?/, "") || "dashboard";
+  const r = decodeURIComponent(location.hash.replace(/^#\/?/, "")) || "projects";
+  const fallback = S.project ? "dashboard" : "projects";
+  if (r.startsWith("area/")) {
+    S.areaName = r.slice(5);
+    return S.project ? "area" : "projects";
+  }
   const item = NAV.find((n) => n.id === r);
-  if (!item || (item.manager && !isManager())) return "dashboard";
+  if (!item || (item.manager && !isManager())) return fallback;
+  if (!item.global && !S.project) return "projects";
   return r;
 }
 
@@ -48,21 +68,37 @@ async function boot() {
   startApp();
 }
 
-async function startApp() {
+let started = false;
+// fresh: just signed in, so start on the Projects page.
+async function startApp(fresh = false) {
+  applySettings(await guard(() => store.getSettings()));
+  const saved = fresh ? "" : projects.savedProject();
+  if (saved && PROJECTS.includes(saved)) {
+    S.project = saved;
+    store.setScope(saved);
+    setCurrentProject(saved);
+  }
   await loadAll();
-  store.subscribe(onRemoteChange);
-  window.addEventListener("hashchange", () => { S.route = routeFromHash(); render(); window.scrollTo(0, 0); });
+  if (!started) {
+    started = true;
+    store.subscribe(onRemoteChange);
+    window.addEventListener("hashchange", () => { S.route = routeFromHash(); render(); window.scrollTo(0, 0); help.onRoute(); });
+  }
+  if (fresh || !S.project) history.replaceState(null, "", "#/projects");
   S.route = routeFromHash();
   render();
+  help.maybeOfferTour();
 }
 
 async function loadAll() {
   await guard(async () => {
-    const [requests, actions, views, profiles, inv, moves, emails] = await Promise.all([
-      store.listRequests(), store.listActions(), store.listViews(), isManager() ? store.listProfiles() : [],
-      store.listInventory(), store.listMoves(), store.listEmailRequests(),
+    const scoped = !!S.project;
+    const [requests, actions, views, profiles, inv, moves, emails, summary] = await Promise.all([
+      scoped ? store.listRequests() : [], store.listActions(), store.listViews(), isManager() ? store.listProfiles() : [],
+      scoped ? store.listInventory() : [], scoped ? store.listMoves() : [], scoped ? store.listEmailRequests() : [],
+      store.projectSummary(),
     ]);
-    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails });
+    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails, summary });
   });
 }
 
@@ -72,8 +108,11 @@ async function onRemoteChange(kind) {
     if (!fresh) { toast("Your access was removed", "err"); setTimeout(() => CLICK.signout(), 1500); return; }
     if (fresh.role !== S.me.role) { S.me = fresh; toast(`Your role is now ${ROLE_LABEL[fresh.role]}`); }
   }
+  if (kind === "all" || kind === "settings") applySettings(await guard(() => store.getSettings()));
   if (kind === "all") await loadAll();
+  else if (kind === "settings") { /* lists updated above */ }
   else if (kind === "profiles") { if (isManager()) S.profiles = (await guard(() => store.listProfiles())) || S.profiles; }
+  else if (!S.project) S.summary = (await guard(() => store.projectSummary())) || S.summary;
   else if (kind === "inventory") await guard(inventory.reloadInventory);
   else if (kind === "email") S.emails = (await guard(() => store.listEmailRequests())) || S.emails;
   else S.requests = (await guard(() => store.listRequests())) || S.requests;
@@ -90,9 +129,9 @@ function renderLogin(mode = "signin", msg = "") {
   app.innerHTML = `
   <div class="login">
     <div class="login-art">
-      <div class="brand-mark lg">BD</div>
-      <h1>Black Desert Resort</h1>
-      <p class="tagline">FF&amp;E Tracker</p>
+      <div class="brand-mark lg">FF</div>
+      <h1>FF&amp;E Tracker</h1>
+      <p class="tagline">Requests · Inventory · Attic stock</p>
       <ul class="proj-list">${PROJECTS.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>
     </div>
     <div class="login-card">
@@ -131,9 +170,9 @@ function renderSetPassword(msg = "") {
   app.innerHTML = `
   <div class="login">
     <div class="login-art">
-      <div class="brand-mark lg">BD</div>
-      <h1>Black Desert Resort</h1>
-      <p class="tagline">FF&amp;E Tracker</p>
+      <div class="brand-mark lg">FF</div>
+      <h1>FF&amp;E Tracker</h1>
+      <p class="tagline">Requests · Inventory · Attic stock</p>
     </div>
     <div class="login-card">
       <h2>Welcome${S.me?.full_name ? `, ${esc(S.me.full_name.split(" ")[0])}` : ""}</h2>
@@ -157,13 +196,14 @@ function badgeCount(kind) {
 }
 
 function render() {
-  const nav = NAV.filter((n) => !n.manager || isManager());
+  const nav = NAV.filter((n) => (!n.manager || isManager()) && (n.global || S.project));
   app.innerHTML = `
   <div class="shell">
     <aside class="side">
-      <div class="brand"><div class="brand-mark">BD</div><div><strong>Black Desert</strong><small>FF&amp;E Tracker</small></div></div>
+      <div class="brand"><div class="brand-mark">FF</div><div><strong>FF&amp;E Tracker</strong><small>Resort projects</small></div></div>
+      ${S.project ? `<a class="cur-project" href="#/projects" data-tour="switch"><small>Project</small><strong>${esc(S.project)}</strong><span>Switch ⇄</span></a>` : ""}
       <nav>${nav.map((n) => `
-        <a href="#/${n.id}" class="nav-item ${S.route === n.id ? "on" : ""}">${icon(n.id)}<span>${n.label}</span>
+        <a href="#/${n.id}" class="nav-item ${S.route === n.id || (n.id === "project" && S.route === "area") ? "on" : ""}" data-tour="nav-${n.id}">${icon(NAV_ICON[n.id] || n.id)}<span>${n.label}</span>
         ${n.badge ? `<em class="count" data-badge="${n.badge}">${badgeCount(n.badge) || ""}</em>` : ""}</a>`).join("")}
       </nav>
       <div class="me">
@@ -174,7 +214,7 @@ function render() {
     </aside>
     <main>
       <header class="topbar">
-        <h1>${TITLES[S.route]}</h1>
+        <h1>${esc(title(S.route))}</h1>
         <span class="mode ${store.mode}">${store.mode === "cloud" ? "Live · shared" : "Demo · this browser only"}</span>
       </header>
       <section class="content">${PAGES[S.route]()}</section>
@@ -208,19 +248,14 @@ function pageDashboard() {
     <a class="kpi link ${email.emailsToReview() ? "warn-soft" : ""}" href="#/email"><span>Emailed requests to review</span><strong>${email.emailsToReview()}</strong></a>
     <a class="kpi link ${lowStock ? "warn" : ""}" href="#/inventory"><span>Low-stock items</span><strong>${lowStock}</strong></a>
     <a class="kpi link" href="#/actions"><span>My open action items</span><strong>${myOpenActions}</strong></a>
+    <button class="kpi link ${followUpsDue(0) ? "warn" : ""}" data-act="show-follow-ups"><span>Follow-ups this week</span><strong>${followUpsDue(7)}</strong></button>
   </div>
 
-  <h2 class="section">Projects</h2>
-  <div class="projects">${PROJECTS.map((p) => {
-    const pr = rows.filter((r) => r.project === p);
-    const counts = STATUSES.map((s) => [s, pr.filter((r) => r.status === s).length]).filter(([, n]) => n);
-    return `<button class="project-card" data-act="filter-project" data-project="${esc(p)}">
-      <span class="pc-name">${esc(p)}</span>
-      <span class="pc-num">${pr.filter((r) => OPEN_STATUSES.includes(r.status)).length}<small> open</small></span>
-      <span class="bar">${counts.map(([s, n]) => `<i class="s-${slug(s)}" style="flex:${n}" title="${esc(s)}: ${n}"></i>`).join("") || '<i class="none" style="flex:1"></i>'}</span>
-      <span class="pc-meta">${pr.length} total${pr.filter((r) => isOverdue(r, today)).length ? ` · <b class="overdue">${pr.filter((r) => isOverdue(r, today)).length} overdue</b>` : ""}</span>
-    </button>`;
-  }).join("")}</div>
+  <div class="section-head">
+    <h2 class="section">Sub-projects</h2>
+    <a class="btn small" href="#/project">See all</a>
+  </div>
+  ${projects.subProjectCards()}
 
   <div class="section-head">
     <h2 class="section">My pinned sheets</h2>
@@ -242,21 +277,23 @@ function pageDashboard() {
 
   <h2 class="section">Recent requests</h2>
   <div class="card flush">${tableHTML(
-    ["ticket", "project", "buildings", "rooms", "item_needed", "needed_by", "status", "requester_name"].map((k) => FIELD_MAP[k]),
+    ["ticket", "sub_project", "buildings", "rooms", "item_needed", "needed_by", "status", "requester_name"].map((k) => FIELD_MAP[k]),
     rows, { limit: 8, empty: "No requests yet. Submit the first one from New Request." })}</div>`;
 }
 
 /* -------------------------------------------------------------- requests */
 function filteredRequests() {
-  const { q, project, status } = S.reqFilter;
+  const { q, sub, status } = S.reqFilter;
   const needle = q.trim().toLowerCase();
   return S.requests.map((r) => toRow(r)).filter((row) =>
-    (!project || row.project === project) &&
-    (!status || (status === "open" ? OPEN_STATUSES.includes(row.status) : status === "overdue" ? isOverdue(row) : row.status === status)) &&
+    (!sub || row.sub_project === sub) &&
+    (!status || (status === "open" ? OPEN_STATUSES.includes(row.status) : status === "overdue" ? isOverdue(row)
+      : status === "closed-out" ? ["Rejected", "Cancelled"].includes(row.status)
+      : status === "follow-up" ? !!row.follow_up_on : row.status === status)) &&
     (!needle || ["ticket", "buildings", "rooms", "item_needed", "ffe_tag", "spec", "requester_name", "details"].some((k) => String(row[k]).toLowerCase().includes(needle))));
 }
 
-const REQUEST_COLS = ["ticket", "project", "buildings", "rooms", "item_needed", "ffe_tag", "needed_by", "priority", "status", "requester_name"];
+const REQUEST_COLS = ["ticket", "sub_project", "buildings", "rooms", "item_needed", "ffe_tag", "needed_by", "priority", "status", "requester_name", "notes"];
 
 function requestsTableHTML() {
   const rows = filteredRequests().sort((a, b) => (b._raw.created_at || "").localeCompare(a._raw.created_at || ""));
@@ -269,8 +306,8 @@ function pageRequests() {
   return `
   <div class="toolbar">
     <input type="search" placeholder="Search ticket, building, room, item, tag…" value="${esc(f.q)}" data-input="req-search" class="grow">
-    <select data-change="req-filter" data-key="project">${opt("", "All projects")}${PROJECTS.map((p) => opt(p, p, f.project === p)).join("")}</select>
-    <select data-change="req-filter" data-key="status">${opt("", "All statuses")}${opt("open", "Open (not closed)", f.status === "open")}${opt("overdue", "Overdue", f.status === "overdue")}${STATUSES.map((s) => opt(s, s, f.status === s)).join("")}</select>
+    ${AREAS.length ? `<select data-change="req-filter" data-key="sub">${opt("", "All sub-projects")}${AREAS.map((p) => opt(p, p, f.sub === p)).join("")}</select>` : ""}
+    <select data-change="req-filter" data-key="status">${opt("", "All statuses")}${opt("open", "Open (not closed)", f.status === "open")}${opt("overdue", "Overdue", f.status === "overdue")}${opt("closed-out", "Rejected & cancelled (follow up)", f.status === "closed-out")}${opt("follow-up", "Has a follow-up", f.status === "follow-up")}${STATUSES.map((s) => opt(s, s, f.status === s)).join("")}</select>
     <button class="btn" data-act="export-requests">${icon("download")} Export</button>
     <a class="btn primary" href="#/new">${icon("new")} New request</a>
   </div>
@@ -286,9 +323,10 @@ function pageNew() {
 
     <fieldset class="card">
       <legend>1. Where</legend>
-      <div class="chip-select" role="radiogroup" aria-label="Project">
-        ${PROJECTS.map((p) => `<label class="chip"><input type="radio" name="project" value="${esc(p)}" ${d.project === p ? "checked" : ""} required><span>${esc(p)}</span></label>`).join("")}
-      </div>
+      <p class="muted small">Project: <b>${esc(CURRENT.project)}</b>${AREAS.length ? " · choose the sub-project" : ""}</p>
+      ${AREAS.length ? `<div class="chip-select" role="radiogroup" aria-label="Sub-project">
+        ${AREAS.map((p) => `<label class="chip"><input type="radio" name="sub_project" value="${esc(p)}" ${d.sub === p ? "checked" : ""} required><span>${esc(p)}</span></label>`).join("")}
+      </div>` : ""}
       <div class="row2">
         <label>Building(s) <em>*</em><input name="buildings" required placeholder="e.g. 89, or 89 & 90"></label>
         <label>Room number(s) <em>*</em><input name="rooms" required placeholder="e.g. 8902, 8904 — or “Lobby”"></label>
@@ -381,12 +419,12 @@ async function submitRequest(form) {
   const v = (k) => String(fd.get(k) || "").trim();
   const err = form.querySelector("#form-error");
   const fields = {
-    project: v("project"), buildings: v("buildings"), rooms: v("rooms"), item_needed: v("item_needed"),
+    project: CURRENT.project, sub_project: v("sub_project"), buildings: v("buildings"), rooms: v("rooms"), item_needed: v("item_needed"),
     ffe_tag: v("ffe_tag"), spec: v("spec"), quantity: Math.max(1, parseInt(v("quantity"), 10) || 1),
     priority: v("priority") || "Normal", needed_by: v("needed_by"), details: v("details"),
   };
   const missing = [];
-  if (!fields.project) missing.push("project");
+  if (AREAS.length && !fields.sub_project) missing.push("sub-project");
   if (!fields.buildings) missing.push("building(s)");
   if (!fields.rooms) missing.push("room number(s)");
   if (!fields.item_needed) missing.push("what you need");
@@ -416,7 +454,7 @@ async function submitRequest(form) {
   btn.textContent = "Submit request";
   if (!created) return;
   S.requests = [created, ...S.requests.filter((r) => r.id !== created.id)];
-  S.draft = { photos: [], project: "" };
+  S.draft = { photos: [], sub: "" };
   toast(`${ticketLabel(created.ticket_no)} submitted for approval`);
   location.hash = "#/requests";
   openRequest(created.id);
@@ -431,7 +469,7 @@ function pageApprovals() {
   const card = (row) => `
     <div class="approval">
       <div class="ap-main" data-act="open-request" data-id="${esc(row._raw.id)}">
-        <div class="ap-top"><strong class="mono">${esc(row.ticket)}</strong> ${badge(row.project, "proj")} ${row.priority !== "Normal" ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div>
+        <div class="ap-top"><strong class="mono">${esc(row.ticket)}</strong> ${badge(row.sub_project || row.project, "proj")} ${row.priority !== "Normal" ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div>
         <h3>${esc(row.item_needed)}</h3>
         <p class="muted small">Bldg ${esc(row.buildings)} · Room ${esc(row.rooms)} · Tag ${esc(row.ffe_tag)} · Qty ${esc(row.quantity)}</p>
         <p class="small">Needed by <span class="${isOverdue(row, today) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}</span> · from ${esc(row.requester_name)} · ${row.concept_photos + row.damage_photos} photo(s)</p>
@@ -471,11 +509,12 @@ async function openRequest(id, refresh = false) {
     <div class="modal" role="dialog" aria-modal="true" aria-label="${esc(row.ticket)}" data-stop>
       <header class="modal-head">
         <div><span class="mono muted">${esc(row.ticket)}</span><h2>${esc(row.item_needed)}</h2>
-          <div class="btn-row">${badge(row.status)} ${badge(row.project, "proj")} ${row.priority !== "Normal" ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div></div>
+          <div class="btn-row">${badge(row.status)} ${badge(row.sub_project || row.project, "proj")} ${row.priority !== "Normal" ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div></div>
         <button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button>
       </header>
       <dl class="facts">
         ${field("Project", esc(row.project))}
+        ${field("Sub-project", esc(row.sub_project))}
         ${field("Building(s)", esc(row.buildings))}
         ${field("Room(s)", esc(row.rooms))}
         ${field("FF&E tag", `<span class="mono">${esc(row.ffe_tag)}</span>`)}
@@ -487,6 +526,8 @@ async function openRequest(id, refresh = false) {
       </dl>
       ${row.details ? `<div class="note-block"><dt>Additional details</dt><p>${esc(row.details)}</p></div>` : ""}
       ${row.review_note ? `<div class="note-block review"><dt>Manager note</dt><p>${esc(row.review_note)}</p></div>` : ""}
+      ${followUpBanner("requests", r)}
+      ${notesBlock("requests", r)}
       ${["concept", "damage"].map((kind) => {
         const list = photos.filter((p) => p.kind === kind);
         return list.length ? `<h3 class="ph-head">${esc(PHOTO_KINDS[kind])} <span class="muted">(${list.length})</span></h3>
@@ -502,6 +543,8 @@ async function openRequest(id, refresh = false) {
         ${isManager() && r.status === "Approved" ? `<button class="btn" data-act="quick-status" data-id="${esc(r.id)}" data-status="In Progress">Start work</button>` : ""}
         ${isManager() && ["Approved", "In Progress"].includes(r.status) ? `<button class="btn approve" data-act="quick-status" data-id="${esc(r.id)}" data-status="Completed">Mark completed</button>` : ""}
         ${mine && r.status === "Pending" ? `<button class="btn" data-act="cancel-request" data-id="${esc(r.id)}">Cancel my request</button>` : ""}
+        ${isManager() && ["Rejected", "Cancelled"].includes(r.status) ? `<button class="btn" data-act="quick-status" data-id="${esc(r.id)}" data-status="Pending">Reopen</button>` : ""}
+        ${r.follow_up_on ? "" : `<button class="btn" data-act="follow-up" data-table="requests" data-id="${esc(r.id)}">Follow up</button>`}
         <button class="btn" data-act="add-to-actions" data-id="${esc(r.id)}" ${linked ? "disabled" : ""}>${linked ? "In my action items" : "Add to my action items"}</button>
       </footer>
     </div>
@@ -602,9 +645,9 @@ async function saveActionField(id, field, value) {
 /* ---------------------------------------------------------- sheet builder */
 const EXAMPLES = [
   "Open Cove requests due in the next 14 days, grouped by building",
-  "Everything overdue, grouped by project, with manager notes",
+  "Everything overdue, grouped by sub-project, with manager notes",
   "My requests and their status, newest first",
-  "Urgent and high priority items across all projects with damage photos",
+  "Urgent and high priority items with damage photos",
 ];
 
 function pageBuilder() {
@@ -690,7 +733,7 @@ async function generateSpec() {
     const res = await fetch(CONFIG.AI_ENDPOINT, {
       method: "POST",
       headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ prompt, today: todayISO(), current: b.viewId ? b.spec : null }),
+      body: JSON.stringify({ prompt, today: todayISO(), current: b.viewId ? b.spec : null, subprojects: AREAS }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `AI assistant unavailable (${res.status})`);
@@ -721,7 +764,7 @@ const PAGES = Object.assign({
 
 /* -------------------------------------------------------------- handlers */
 const CLICK = {
-  async "demo-login"(el) { S.me = await store.signInAs(el.dataset.id); startApp(); },
+  async "demo-login"(el) { S.me = await store.signInAs(el.dataset.id); startApp(true); },
   "demo-reset"() { store.resetDemo(); toast("Demo data reset"); renderLogin(); },
   "login-tab"(el) { renderLogin(el.dataset.mode); },
   async forgot() {
@@ -732,10 +775,11 @@ const CLICK = {
   async signout() { await store.signOut(); location.hash = ""; location.reload(); },
   "open-request"(el) { openRequest(el.dataset.id); },
   "close-modal"() { closeModal(); },
-  "filter-project"(el) { S.reqFilter = { q: "", project: el.dataset.project, status: "" }; location.hash = "#/requests"; },
+  "show-follow-ups"() { S.reqFilter = { q: "", sub: "", status: "follow-up" }; location.hash = "#/requests"; },
+  "filter-sub"(el) { S.reqFilter = { q: "", sub: el.dataset.sub, status: "" }; location.hash = "#/requests"; },
   "export-requests"() {
     const rows = filteredRequests();
-    downloadWorkbook(`BDR FF&E Requests ${todayISO()}`, [requestsTab("Overall Requests", rows)]);
+    downloadWorkbook(`${CURRENT.project} FF&E Requests ${todayISO()}`, [requestsTab("Overall Requests", rows)]);
   },
   "remove-photo"(el) { S.draft.photos.splice(Number(el.dataset.idx), 1); document.getElementById("photo-list").innerHTML = photoListHTML(); },
   "quick-review"(el) { setRequestStatus(el.dataset.id, el.dataset.status, ""); },
@@ -750,7 +794,7 @@ const CLICK = {
     const r = S.requests.find((x) => x.id === el.dataset.id);
     const item = await guard(() => store.saveAction({
       title: `Follow up: ${r.item_needed}`.slice(0, 200), status: "Not Started", priority: r.priority || "Normal",
-      due_date: r.needed_by, linked_ticket: ticketLabel(r.ticket_no), category: r.project, notes: `Bldg ${r.buildings} · Room ${r.rooms}`,
+      due_date: r.needed_by, linked_ticket: ticketLabel(r.ticket_no), category: r.sub_project || r.project, notes: `Bldg ${r.buildings} · Room ${r.rooms}`,
     }), "Added to your action items");
     if (item) { S.actions = [...S.actions.filter((a) => a.id !== item.id), item]; openRequest(r.id); }
   },
@@ -774,7 +818,7 @@ const CLICK = {
     const all = S.requests.map((r) => toRow(r)).sort((a, b) => a.ticket.localeCompare(b.ticket));
     const tabs = [requestsTab("Overall Requests", all), actionsTab(`${S.me.full_name || "My"} Items`, S.actions)];
     S.views.forEach((v) => tabs.push(viewTab(v.name, applyView(v.spec, S.requests, S.me))));
-    downloadWorkbook(`BDR FF&E Combined - ${S.me.full_name || "Me"} ${todayISO()}`, tabs);
+    downloadWorkbook(`${CURRENT.project} FF&E Combined - ${S.me.full_name || "Me"} ${todayISO()}`, tabs);
   },
   example(el) { S.builder.prompt = el.dataset.text; render(); },
   "ai-generate"() { generateSpec(); },
@@ -851,13 +895,13 @@ const SUBMIT = {
   async signin(form) {
     const fd = new FormData(form);
     const me = await guard(() => store.signIn(String(fd.get("email")).trim(), String(fd.get("password"))));
-    if (me) { S.me = me; startApp(); }
+    if (me) { S.me = me; startApp(true); }
   },
   async signup(form) {
     const fd = new FormData(form);
     const res = await guard(() => store.signUp(String(fd.get("name")).trim(), String(fd.get("email")).trim(), String(fd.get("password"))));
     if (res === null) renderLogin("signin", "Account created. Check your email to confirm it, then sign in.");
-    else if (res) { S.me = res; startApp(); }
+    else if (res) { S.me = res; startApp(true); }
   },
   request(form) { submitRequest(form); },
   async "set-password"(form) {
@@ -865,7 +909,7 @@ const SUBMIT = {
     const pw = String(fd.get("password"));
     if (pw !== String(fd.get("confirm"))) { renderSetPassword("Those passwords don't match."); return; }
     const ok = await guard(async () => { await store.setPassword(pw); return true; }, "Password saved");
-    if (ok) { history.replaceState(null, "", location.pathname); startApp(); }
+    if (ok) { history.replaceState(null, "", location.pathname); startApp(true); }
   },
   "add-filter"(form) {
     const fd = new FormData(form);
@@ -883,7 +927,10 @@ for (const m of MODULES) {
   Object.assign(INPUT, m.INPUT);
   Object.assign(SUBMIT, m.SUBMIT);
 }
-Object.assign(hooks, { render, openRequest: (id) => openRequest(id), closeModal: () => closeModal() });
+Object.assign(hooks, {
+  render, openRequest: (id) => openRequest(id), closeModal: () => closeModal(),
+  reload: async () => { await loadAll(); render(); },
+});
 
 function delegate(root) {
   root.addEventListener("click", (e) => {
@@ -897,7 +944,7 @@ function delegate(root) {
   root.addEventListener("change", (e) => {
     const el = e.target.closest("[data-change]");
     if (el) CHANGE[el.dataset.change]?.(el);
-    if (e.target.name === "project" && e.target.type === "radio") S.draft.project = e.target.value;
+    if (e.target.name === "sub_project" && e.target.type === "radio" && e.target.closest('[data-form="request"]')) S.draft.sub = e.target.value;
   });
   root.addEventListener("input", (e) => {
     const el = e.target.closest("[data-input]");
@@ -913,5 +960,6 @@ function delegate(root) {
 
 delegate(app);
 delegate(modalRoot);
+notes.initNoteTips();
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modalRoot.innerHTML) closeModal(); });
 boot();

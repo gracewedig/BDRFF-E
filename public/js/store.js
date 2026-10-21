@@ -1,7 +1,7 @@
 // Data layer. Uses Supabase (shared database, logins, photo storage, live updates)
 // when config.js has keys; otherwise a single-browser Demo store in localStorage.
 import { CONFIG } from "./config.js";
-import { todayISO, addDaysISO } from "./fields.js";
+import { todayISO, addDaysISO, DEFAULT_SETTINGS } from "./fields.js";
 import { parseEmailHeuristic } from "./emailparse.js";
 import { findMatches, DUP_THRESHOLD } from "./dedupe.js";
 
@@ -15,6 +15,10 @@ function check({ data, error }) {
   if (error) throw new Error(error.message || String(error));
   return data;
 }
+
+// The project (resort) being worked on; lists only return its records.
+let SCOPE = "";
+const inScope = (r) => !SCOPE || r.project === SCOPE;
 
 const CHUNK = 200;
 const chunks = (arr) => Array.from({ length: Math.ceil(arr.length / CHUNK) }, (_, i) => arr.slice(i * CHUNK, (i + 1) * CHUNK));
@@ -57,8 +61,20 @@ function createCloudStore() {
       return data.session?.access_token || "";
     },
 
+    setScope(project) { SCOPE = project || ""; },
     async listRequests() {
-      return check(await sb.from("requests").select("*").order("created_at", { ascending: false }));
+      let q = sb.from("requests").select("*").order("created_at", { ascending: false });
+      if (SCOPE) q = q.eq("project", SCOPE);
+      return check(await q);
+    },
+    // Counts for the Projects page (all projects).
+    async projectSummary() {
+      const [requests, inventory, emails] = await Promise.all([
+        sb.from("requests").select("project, sub_project, status, needed_by").then(check),
+        sb.from("inventory_items").select("project, sub_project, quantity, min_qty").then(check),
+        sb.from("email_requests").select("project, status").eq("status", "New").then(check),
+      ]);
+      return { requests, inventory, emails };
     },
     async createRequest(fields, photos) {
       const uploaded = [];
@@ -68,7 +84,7 @@ function createCloudStore() {
         uploaded.push({ path, kind: p.kind, name: p.name });
       }
       return check(await sb.from("requests")
-        .insert({ ...fields, photos: uploaded, requested_by: me.id, requester_name: me.full_name || me.email })
+        .insert({ project: SCOPE, ...fields, photos: uploaded, requested_by: me.id, requester_name: me.full_name || me.email })
         .select().single());
     },
     // Insert prepared tickets (email conversions, spreadsheet imports); photos are already stored.
@@ -76,7 +92,7 @@ function createCloudStore() {
       const out = [];
       const stamp = { requested_by: me.id };
       for (const part of chunks(rows)) {
-        out.push(...check(await sb.from("requests").insert(part.map((r) => ({ requester_name: me.full_name || me.email, ...r, ...stamp }))).select()));
+        out.push(...check(await sb.from("requests").insert(part.map((r) => ({ project: SCOPE, requester_name: me.full_name || me.email, ...r, ...stamp }))).select()));
       }
       return out;
     },
@@ -133,35 +149,59 @@ function createCloudStore() {
     inviteUser(p) { return this.manageUser("invite", p); },
     removeUser(id) { return this.manageUser("remove", { id }); },
 
+    async getSettings() {
+      return check(await sb.from("app_settings").select("projects, options").eq("id", 1).maybeSingle()) || DEFAULT_SETTINGS;
+    },
+    async saveSettings(settings) {
+      return check(await sb.from("app_settings").update({ projects: settings.projects, options: settings.options, updated_at: new Date().toISOString() }).eq("id", 1).select("projects, options").single());
+    },
+    async renameProject(oldName, newName, subOld = null, subNew = null) {
+      check(await sb.rpc("rename_project", { p_old: oldName, p_new: newName, p_sub_old: subOld, p_sub_new: subNew }));
+    },
+    // table: "requests" | "inventory_items" | "email_requests"
+    async setNotes(table, id, notes) {
+      check(await sb.rpc("set_item_notes", { p_table: table, p_id: id, p_notes: notes }));
+    },
+    async setFollowUp(table, id, on, note) {
+      check(await sb.rpc("set_follow_up", { p_table: table, p_id: id, p_on: on || null, p_note: note || null }));
+    },
+
     async listInventory() {
-      return check(await sb.from("inventory_items").select("*").order("project").order("category").order("item_name"));
+      let q = sb.from("inventory_items").select("*").order("sub_project").order("category").order("item_name");
+      if (SCOPE) q = q.eq("project", SCOPE);
+      return check(await q);
     },
     async listMoves() {
-      return check(await sb.from("inventory_moves").select("*").order("moved_at", { ascending: false }).limit(1000));
+      let q = sb.from("inventory_moves").select("*, inventory_items!inner(project)").order("moved_at", { ascending: false }).limit(1000);
+      if (SCOPE) q = q.eq("inventory_items.project", SCOPE);
+      return check(await q).map(({ inventory_items, ...m }) => m);
     },
     async saveInventoryItem(item) {
       const { id, created_at, created_by, ...fields } = item;
       fields.updated_at = new Date().toISOString();
       return id
         ? check(await sb.from("inventory_items").update(fields).eq("id", id).select().single())
-        : check(await sb.from("inventory_items").insert(fields).select().single());
+        : check(await sb.from("inventory_items").insert({ project: SCOPE, ...fields }).select().single());
     },
     async bulkSaveInventory(newItems, updates) {
       const out = [];
-      for (const part of chunks(newItems)) out.push(...check(await sb.from("inventory_items").insert(part).select()));
+      for (const part of chunks(newItems)) out.push(...check(await sb.from("inventory_items").insert(part.map((i) => ({ project: SCOPE, ...i }))).select()));
       for (const u of updates) out.push(await this.saveInventoryItem(u));
       return out;
     },
     async deleteInventoryItem(id) { check(await sb.from("inventory_items").delete().eq("id", id)); },
     async recordMove(m) {
       return check(await sb.rpc("record_inventory_move", {
-        p_item: m.item_id, p_direction: m.direction, p_qty: m.quantity, p_dest_project: m.dest_project || null,
+        p_item: m.item_id, p_direction: m.direction, p_qty: m.quantity, p_dest_sub_project: m.dest_sub_project || null,
         p_dest_building: m.dest_building || null, p_dest_room: m.dest_room || null, p_ticket: m.linked_ticket || null, p_note: m.note || null,
       }));
     },
 
     async listEmailRequests() {
-      return check(await sb.from("email_requests").select("*").order("received_at", { ascending: false }).limit(500));
+      let q = sb.from("email_requests").select("*").order("received_at", { ascending: false }).limit(500);
+      // Emails that didn't name a project show up in every project so they aren't missed.
+      if (SCOPE) q = q.or(`project.eq."${SCOPE.replace(/"/g, "")}",project.is.null`);
+      return check(await q);
     },
     async updateEmailRequest(id, patch) {
       return check(await sb.from("email_requests").update(patch).eq("id", id).select().single());
@@ -175,7 +215,7 @@ function createCloudStore() {
       const res = await fetch(CONFIG.EMAIL_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${data.session?.access_token || ""}` },
-        body: JSON.stringify(email),
+        body: JSON.stringify({ ...email, project_hint: SCOPE }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `Email intake unavailable (${res.status})`);
@@ -189,6 +229,7 @@ function createCloudStore() {
         .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, () => onChange("inventory"))
         .on("postgres_changes", { event: "INSERT", schema: "public", table: "inventory_moves" }, () => onChange("inventory"))
         .on("postgres_changes", { event: "*", schema: "public", table: "email_requests" }, () => onChange("email"))
+        .on("postgres_changes", { event: "*", schema: "public", table: "app_settings" }, () => onChange("settings"))
         .subscribe();
       return () => sb.removeChannel(ch);
     },
@@ -209,10 +250,11 @@ function createDemoStore() {
       { id: "u-or1", full_name: "Riley Chen", email: "riley@example.com", role: "owner_relations", created_at: new Date().toISOString() },
       { id: "u-or2", full_name: "Jordan Ruiz", email: "jordan@example.com", role: "owner_relations", created_at: new Date().toISOString() },
     ];
+    const BDR = "Black Desert Resort";
     const mk = (n, p, extra) => ({
       id: uid(), ticket_no: n, quantity: 1, priority: "Normal", spec: "", details: "", photos: [],
       status: "Pending", requested_by: "u-or1", requester_name: "Riley Chen",
-      created_at: new Date(Date.now() - (10 - n) * 86400000).toISOString(), project: p, ...extra,
+      created_at: new Date(Date.now() - (10 - n) * 86400000).toISOString(), project: BDR, sub_project: p, ...extra,
     });
     const requests = [
       mk(1, "The Cove", { buildings: "89", rooms: "8902, 8904", item_needed: "Replace torn lounge chair cushions on balcony", ffe_tag: "FFE-COV-OD-114", spec: "Sunbrella Canvas Navy, 24x24x4", quantity: 4, needed_by: addDaysISO(t, 5), priority: "High" }),
@@ -221,8 +263,8 @@ function createDemoStore() {
       mk(4, "Resort Center", { buildings: "Main lobby", rooms: "Lobby lounge", item_needed: "Area rug stain – deep clean or replace", ffe_tag: "FFE-RC-LB-002", needed_by: addDaysISO(t, 12), status: "In Progress", priority: "Urgent", reviewer_name: "Morgan Hale", reviewed_at: new Date().toISOString() }),
       mk(5, "Pickleball", { buildings: "Pavilion", rooms: "Court 3", item_needed: "Two replacement spectator benches", ffe_tag: "FFE-PB-BN-003", quantity: 2, needed_by: addDaysISO(t, 30), status: "Completed", reviewer_name: "Morgan Hale", reviewed_at: new Date().toISOString() }),
     ];
-    const inv = (project, stock_type, item_name, ffe_tag, category, location, quantity, min_qty, extra = {}) => ({
-      id: uid(), project, stock_type, item_name, ffe_tag, category, location, quantity, min_qty, unit: "ea",
+    const inv = (sub_project, stock_type, item_name, ffe_tag, category, location, quantity, min_qty, extra = {}) => ({
+      id: uid(), project: BDR, sub_project, stock_type, item_name, ffe_tag, category, location, quantity, min_qty, unit: "ea",
       description: "", vendor: "", notes: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...extra,
     });
     const inventory = [
@@ -236,8 +278,8 @@ function createDemoStore() {
       inv("Pickleball", "Inventory", "Spectator bench", "FFE-PB-BN-003", "Seating", "Pavilion storage", 1, 1),
     ];
     const moves = [{
-      id: uid(), item_id: inventory[3].id, direction: "out", quantity: 1, qty_after: 40, dest_project: "The Terrace",
-      dest_building: "12", dest_room: "1207", linked_ticket: "BDR-0002", note: "Installed", moved_by: "u-mgr",
+      id: uid(), item_id: inventory[3].id, direction: "out", quantity: 1, qty_after: 40, dest_sub_project: "The Terrace",
+      dest_building: "12", dest_room: "1207", linked_ticket: "REQ-0002", note: "Installed", moved_by: "u-mgr",
       moved_by_name: "Morgan Hale", moved_at: new Date(Date.now() - 86400000).toISOString(),
     }];
     const emails = [];
@@ -252,7 +294,16 @@ function createDemoStore() {
     emails.push(mkEmail("Vendor Newsletter", "news@example.com", "Our fall catalog is here",
       "Browse our latest outdoor collection and save 20% this month."));
     emails[2].is_request = false;
-    return { users, requests, actions: [], views: [], inventory, moves, emails, seq: requests.length };
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.projects.find((p) => p.name === "Cornerstone").subprojects = ["Clubhouse", "Golf Cottages"];
+    settings.options.locations = ["Bldg 12 attic", "Bldg 89 attic", "Bldg 90 storage", "Main warehouse", "Waterpark storage room"];
+    requests.push(mk(6, "Clubhouse", { project: "Cornerstone", buildings: "Clubhouse", rooms: "Grill room", item_needed: "Re-upholster six bar stools", ffe_tag: "FFE-CS-CH-021", quantity: 6, needed_by: addDaysISO(t, 18), requested_by: "u-or2", requester_name: "Jordan Ruiz" }));
+    inventory.push(inv("Golf Cottages", "Attic Stock", "Cottage lamp – brass", "FFE-CS-GC-004", "Lighting", "Cottage 3 storage", 5, 2, { project: "Cornerstone" }));
+    requests[1].notes = "Vendor confirmed brass pulls in stock; install Thursday.";
+    requests[4].notes = "Benches installed. Keep one spare in pavilion storage.";
+    inventory[1].notes = "Two chairs are on backorder until mid-November.";
+    emails.forEach((e) => { if (!e.project) e.project = null; });
+    return { users, requests, actions: [], views: [], inventory, moves, emails, settings, seq: requests.length };
   }
 
   // Same duplicate rules the email-intake function applies.
@@ -306,12 +357,17 @@ function createDemoStore() {
     async accessToken() { return ""; },
     resetDemo() { try { localStorage.removeItem(KEY); } catch { /* ignore */ } },
 
-    async listRequests() { return [...load().requests].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+    setScope(project) { SCOPE = project || ""; },
+    async listRequests() { return load().requests.filter(inScope).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+    async projectSummary() {
+      const db = load();
+      return { requests: db.requests, inventory: db.inventory, emails: db.emails.filter((e) => e.status === "New") };
+    },
     async createRequest(fields, photos) {
       const db = load();
       const u = me();
       const r = {
-        ...fields, id: uid(), ticket_no: ++db.seq, status: "Pending", requested_by: u.id, requester_name: u.full_name,
+        project: SCOPE, ...fields, id: uid(), ticket_no: ++db.seq, status: "Pending", requested_by: u.id, requester_name: u.full_name,
         photos: photos.map((p) => ({ path: uid(), kind: p.kind, name: p.name, data: p.dataUrl })),
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       };
@@ -324,7 +380,7 @@ function createDemoStore() {
       const u = me();
       const now = new Date().toISOString();
       const out = rows.map((r) => ({
-        quantity: 1, priority: "Normal", photos: [], status: "Pending", requester_name: u.full_name, ...r,
+        project: SCOPE, quantity: 1, priority: "Normal", photos: [], status: "Pending", requester_name: u.full_name, ...r,
         id: uid(), ticket_no: ++db.seq, requested_by: u.id, created_at: now, updated_at: now,
       }));
       db.requests.push(...out);
@@ -385,21 +441,53 @@ function createDemoStore() {
       return { ok: true };
     },
 
-    async listInventory() { return load().inventory; },
-    async listMoves() { return [...load().moves].sort((a, b) => b.moved_at.localeCompare(a.moved_at)); },
+    async getSettings() { return load().settings || DEFAULT_SETTINGS; },
+    async saveSettings(settings) { const db = load(); db.settings = structuredClone(settings); save(db); return db.settings; },
+    async renameProject(oldName, newName, subOld = null, subNew = null) {
+      const db = load();
+      for (const r of [...db.requests, ...db.inventory, ...db.emails]) {
+        if (subOld == null) { if (r.project === oldName) r.project = newName; }
+        else if (r.project === oldName && r.sub_project === subOld) r.sub_project = subNew;
+      }
+      if (subOld != null) {
+        const ids = new Set(db.inventory.filter((i) => i.project === oldName).map((i) => i.id));
+        db.moves.forEach((m) => { if (ids.has(m.item_id) && m.dest_sub_project === subOld) m.dest_sub_project = subNew; });
+      }
+      save(db);
+    },
+    async setNotes(table, id, notes) {
+      const db = load();
+      const list = { requests: db.requests, inventory_items: db.inventory, email_requests: db.emails }[table];
+      const it = list.find((x) => x.id === id);
+      Object.assign(it, { notes: notes || null, notes_updated_at: new Date().toISOString(), notes_updated_by_name: me().full_name });
+      save(db);
+    },
+    async setFollowUp(table, id, on, note) {
+      const db = load();
+      const it = (table === "requests" ? db.requests : db.emails).find((x) => x.id === id);
+      Object.assign(it, { follow_up_on: on || null, follow_up_note: note || null, follow_up_by_name: on ? me().full_name : null });
+      save(db);
+    },
+
+    async listInventory() { return load().inventory.filter(inScope); },
+    async listMoves() {
+      const db = load();
+      const ids = new Set(db.inventory.filter(inScope).map((i) => i.id));
+      return db.moves.filter((m) => ids.has(m.item_id)).sort((a, b) => b.moved_at.localeCompare(a.moved_at));
+    },
     async saveInventoryItem(item) {
       const db = load();
       const now = new Date().toISOString();
       let it = item.id && db.inventory.find((x) => x.id === item.id);
       if (it) Object.assign(it, item, { updated_at: now });
-      else { it = { unit: "ea", ...item, id: uid(), created_at: now, updated_at: now }; db.inventory.push(it); }
+      else { it = { project: SCOPE, unit: "ea", ...item, id: uid(), created_at: now, updated_at: now }; db.inventory.push(it); }
       save(db);
       return { ...it };
     },
     async bulkSaveInventory(newItems, updates) {
       const db = load();
       const now = new Date().toISOString();
-      const created = newItems.map((i) => ({ unit: "ea", ...i, id: uid(), created_at: now, updated_at: now }));
+      const created = newItems.map((i) => ({ project: SCOPE, unit: "ea", ...i, id: uid(), created_at: now, updated_at: now }));
       db.inventory.push(...created);
       updates.forEach((u) => Object.assign(db.inventory.find((x) => x.id === u.id) || {}, u, { updated_at: now }));
       save(db);
@@ -425,7 +513,9 @@ function createDemoStore() {
       return { ...it };
     },
 
-    async listEmailRequests() { return [...load().emails].sort((a, b) => b.received_at.localeCompare(a.received_at)); },
+    async listEmailRequests() {
+      return load().emails.filter((e) => !SCOPE || !e.project || e.project === SCOPE).sort((a, b) => b.received_at.localeCompare(a.received_at));
+    },
     async updateEmailRequest(id, patch) {
       const db = load();
       const e = db.emails.find((x) => x.id === id);
@@ -441,7 +531,7 @@ function createDemoStore() {
     },
     async submitEmail({ from_name, from_email, subject, text }) {
       const db = load();
-      const f = parseEmailHeuristic({ subject, text });
+      const f = parseEmailHeuristic({ subject, text, hint: SCOPE });
       const e = { id: uid(), message_id: uid(), received_at: new Date().toISOString(), from_email, from_name, subject, body: text, attachments: [], ...f, created_by: meId() };
       Object.assign(e, classifyEmail(db, e));
       db.emails.push(e);

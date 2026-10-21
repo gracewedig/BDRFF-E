@@ -37,7 +37,7 @@ $$;
 create table if not exists public.requests (
   id uuid primary key default gen_random_uuid(),
   ticket_no bigint generated always as identity,
-  project text not null check (project in ('The Terrace', 'The Cove', 'Resort Center', 'Pickleball', 'Waterpark')),
+  project text not null,
   buildings text not null,
   rooms text not null,
   item_needed text not null,
@@ -62,11 +62,43 @@ create table if not exists public.requests (
   updated_at timestamptz not null default now()
 );
 
+-- ------------------------------------------- settings: projects & options
+-- Managers edit these on the Settings page.
+create table if not exists public.app_settings (
+  id int primary key default 1 check (id = 1),
+  projects jsonb not null,       -- [{ name, subprojects: [...], aliases: [], archived }], e.g. a resort and its areas
+  options jsonb not null default '{}'::jsonb,  -- { categories: [], locations: [], units: [] }
+  updated_at timestamptz not null default now()
+);
+insert into public.app_settings (id, projects) values (1, '[
+  {"name": "Black Desert Resort", "aliases": ["BDR"], "subprojects": ["The Terrace", "The Cove", "Resort Center", "Pickleball", "Waterpark"]},
+  {"name": "Cornerstone", "aliases": [], "subprojects": []},
+  {"name": "Sweetens Cove", "aliases": [], "subprojects": []},
+  {"name": "Marcella", "aliases": [], "subprojects": []}
+]'::jsonb) on conflict (id) do nothing;
+
+-- Projects are now managed in app_settings, so drop the old fixed lists.
+alter table public.requests drop constraint if exists requests_project_check;
+
+-- Sub-projects, shared notes and follow-ups on every kind of item.
+alter table public.requests add column if not exists sub_project text;
+alter table public.requests add column if not exists notes text;
+alter table public.requests add column if not exists notes_updated_at timestamptz;
+alter table public.requests add column if not exists notes_updated_by_name text;
+alter table public.requests add column if not exists follow_up_on date;
+alter table public.requests add column if not exists follow_up_note text;
+alter table public.requests add column if not exists follow_up_by_name text;
+
 -- Only managers may change review fields; requesters may only cancel their own pending request.
 create or replace function public.guard_request_update()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
   if public.is_manager() then
+    return new;
+  end if;
+  -- Anyone may add notes or a follow-up (through set_item_notes / set_follow_up).
+  if (to_jsonb(new) - array['notes', 'notes_updated_at', 'notes_updated_by_name', 'follow_up_on', 'follow_up_note', 'follow_up_by_name', 'updated_at'])
+     = (to_jsonb(old) - array['notes', 'notes_updated_at', 'notes_updated_by_name', 'follow_up_on', 'follow_up_note', 'follow_up_by_name', 'updated_at']) then
     return new;
   end if;
   if old.requested_by is distinct from auth.uid() or old.status <> 'Pending' then
@@ -88,7 +120,7 @@ create trigger guard_request_update before update on public.requests
 -- ------------------------------------------------- inventory & attic stock
 create table if not exists public.inventory_items (
   id uuid primary key default gen_random_uuid(),
-  project text not null check (project in ('The Terrace', 'The Cove', 'Resort Center', 'Pickleball', 'Waterpark')),
+  project text not null,
   stock_type text not null default 'Attic Stock' check (stock_type in ('Attic Stock', 'Inventory')),
   item_name text not null,
   ffe_tag text,
@@ -111,7 +143,7 @@ create table if not exists public.inventory_moves (
   direction text not null check (direction in ('out', 'in')),
   quantity int not null check (quantity > 0),
   qty_after int not null,
-  dest_project text,
+  dest_sub_project text,
   dest_building text,
   dest_room text,
   linked_ticket text,
@@ -120,13 +152,20 @@ create table if not exists public.inventory_moves (
   moved_by_name text,
   moved_at timestamptz not null default now()
 );
+alter table public.inventory_items drop constraint if exists inventory_items_project_check;
+alter table public.inventory_items add column if not exists sub_project text;
+alter table public.inventory_items add column if not exists notes_updated_at timestamptz;
+alter table public.inventory_items add column if not exists notes_updated_by_name text;
+
 create index if not exists inventory_moves_item on public.inventory_moves (item_id, moved_at desc);
+
+drop function if exists public.record_inventory_move(uuid, text, int, text, text, text, text, text);
 
 -- Any signed-in staff member can take stock out (or put it back); the count and
 -- the log entry are written together so they can't drift apart.
 create or replace function public.record_inventory_move(
   p_item uuid, p_direction text, p_qty int,
-  p_dest_project text default null, p_dest_building text default null, p_dest_room text default null,
+  p_dest_sub_project text default null, p_dest_building text default null, p_dest_room text default null,
   p_ticket text default null, p_note text default null)
 returns public.inventory_items language plpgsql security definer set search_path = public as $$
 declare
@@ -143,9 +182,9 @@ begin
   update public.inventory_items
      set quantity = quantity + case when p_direction = 'out' then -p_qty else p_qty end, updated_at = now()
    where id = p_item returning * into it;
-  insert into public.inventory_moves (item_id, direction, quantity, qty_after, dest_project, dest_building, dest_room,
+  insert into public.inventory_moves (item_id, direction, quantity, qty_after, dest_sub_project, dest_building, dest_room,
                                       linked_ticket, note, moved_by, moved_by_name)
-  values (p_item, p_direction, p_qty, it.quantity, nullif(p_dest_project, ''), nullif(p_dest_building, ''),
+  values (p_item, p_direction, p_qty, it.quantity, nullif(p_dest_sub_project, ''), nullif(p_dest_building, ''),
           nullif(p_dest_room, ''), nullif(p_ticket, ''), nullif(p_note, ''), auth.uid(),
           (select full_name from public.profiles where id = auth.uid()));
   return it;
@@ -186,6 +225,42 @@ create table if not exists public.email_requests (
   created_by uuid references public.profiles (id) on delete set null,
   created_at timestamptz not null default now()
 );
+
+alter table public.email_requests add column if not exists sub_project text;
+alter table public.email_requests add column if not exists notes text;
+alter table public.email_requests add column if not exists notes_updated_at timestamptz;
+alter table public.email_requests add column if not exists notes_updated_by_name text;
+alter table public.email_requests add column if not exists follow_up_on date;
+alter table public.email_requests add column if not exists follow_up_note text;
+alter table public.email_requests add column if not exists follow_up_by_name text;
+
+-- Notes and follow-ups can be written by any signed-in staff member on any item,
+-- even where they can't otherwise edit it.
+create or replace function public.set_item_notes(p_table text, p_id uuid, p_notes text)
+returns void language plpgsql security definer set search_path = public as $$
+declare who text;
+begin
+  if auth.uid() is null then raise exception 'Please sign in'; end if;
+  if p_table not in ('requests', 'inventory_items', 'email_requests') then raise exception 'Unknown item type'; end if;
+  select full_name into who from public.profiles where id = auth.uid();
+  execute format('update public.%I set notes = $1, notes_updated_at = now(), notes_updated_by_name = $2 where id = $3', p_table)
+    using nullif(p_notes, ''), who, p_id;
+end $$;
+revoke all on function public.set_item_notes from public, anon;
+grant execute on function public.set_item_notes to authenticated;
+
+create or replace function public.set_follow_up(p_table text, p_id uuid, p_on date, p_note text)
+returns void language plpgsql security definer set search_path = public as $$
+declare who text;
+begin
+  if auth.uid() is null then raise exception 'Please sign in'; end if;
+  if p_table not in ('requests', 'email_requests') then raise exception 'Unknown item type'; end if;
+  select full_name into who from public.profiles where id = auth.uid();
+  execute format('update public.%I set follow_up_on = $1, follow_up_note = $2, follow_up_by_name = case when $1 is null then null else $3 end where id = $4', p_table)
+    using p_on, nullif(p_note, ''), who, p_id;
+end $$;
+revoke all on function public.set_follow_up from public, anon;
+grant execute on function public.set_follow_up to authenticated;
 
 -- When someone submits a ticket in the app that an emailed request already
 -- describes, the email copy is filed as a duplicate so managers review it once.
@@ -236,6 +311,34 @@ alter table public.saved_views enable row level security;
 alter table public.inventory_items enable row level security;
 alter table public.inventory_moves enable row level security;
 alter table public.email_requests enable row level security;
+alter table public.app_settings enable row level security;
+
+drop policy if exists "everyone reads settings" on public.app_settings;
+create policy "everyone reads settings" on public.app_settings for select to authenticated using (true);
+drop policy if exists "managers edit settings" on public.app_settings;
+create policy "managers edit settings" on public.app_settings for update to authenticated
+  using (public.is_manager()) with check (public.is_manager());
+
+-- Renaming a project (or sub-project) updates every record that uses it.
+create or replace function public.rename_project(p_old text, p_new text, p_sub_old text default null, p_sub_new text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare t text;
+begin
+  if not public.is_manager() then raise exception 'Only managers can rename projects'; end if;
+  foreach t in array array['requests', 'inventory_items', 'email_requests'] loop
+    if p_sub_old is null then
+      execute format('update public.%I set project = $1 where project = $2', t) using p_new, p_old;
+    else
+      execute format('update public.%I set sub_project = $1 where project = $2 and sub_project = $3', t) using p_sub_new, p_old, p_sub_old;
+    end if;
+  end loop;
+  if p_sub_old is not null then
+    update public.inventory_moves m set dest_sub_project = p_sub_new
+      from public.inventory_items i where i.id = m.item_id and i.project = p_old and m.dest_sub_project = p_sub_old;
+  end if;
+end $$;
+revoke all on function public.rename_project from public, anon;
+grant execute on function public.rename_project to authenticated;
 
 drop policy if exists "everyone sees inventory" on public.inventory_items;
 create policy "everyone sees inventory" on public.inventory_items for select to authenticated using (true);
@@ -304,7 +407,7 @@ end $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests'] loop
+  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests', 'app_settings'] loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
     exception when duplicate_object then null;

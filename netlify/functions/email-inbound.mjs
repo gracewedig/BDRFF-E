@@ -6,7 +6,7 @@
 // ANTHROPIC_API_KEY is optional; without it the built-in reader is used.
 import Anthropic from "@anthropic-ai/sdk";
 import { adminClient, callerProfile, json } from "../lib/server.mjs";
-import { PROJECTS, PRIORITIES, todayISO } from "../../public/js/fields.js";
+import { PROJECTS, PRIORITIES, SETTINGS, todayISO, applySettings, subProjects } from "../../public/js/fields.js";
 import { parseEmailHeuristic, htmlToText, stripQuoted } from "../../public/js/emailparse.js";
 import { findMatches, DUP_THRESHOLD } from "../../public/js/dedupe.js";
 
@@ -14,14 +14,15 @@ const BUCKET = "ffe-photos";
 const MAX_PHOTOS = 10;
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 
-const EXTRACT_SCHEMA = {
+const extractSchema = () => ({
   type: "object",
   additionalProperties: false,
-  required: ["is_request", "project", "buildings", "rooms", "item_needed", "ffe_tag", "spec", "quantity", "priority",
+  required: ["is_request", "project", "sub_project", "buildings", "rooms", "item_needed", "ffe_tag", "spec", "quantity", "priority",
     "needed_by", "details", "photo_kind", "summary", "duplicate_of", "duplicate_reason"],
   properties: {
     is_request: { type: "boolean", description: "True if this email asks for FF&E to be fixed, replaced, ordered or installed" },
     project: { type: "string", enum: [...PROJECTS, "Unknown"] },
+    sub_project: { type: "string", description: "One of the project's sub-projects if the email names one, else empty" },
     buildings: { type: "string" },
     rooms: { type: "string" },
     item_needed: { type: "string", description: "Short description of what is needed, like a ticket title" },
@@ -36,10 +37,10 @@ const EXTRACT_SCHEMA = {
     duplicate_of: { type: "string", description: "The id of the candidate that describes the same need, or \"none\"" },
     duplicate_reason: { type: "string" },
   },
-};
+});
 
-const SYSTEM = `You read emails sent to the Black Desert Resort FF&E (furniture, fixtures & equipment) team and turn them into request tickets.
-Projects: ${PROJECTS.join(", ")}. Use "Unknown" if the email doesn't say.
+const systemPrompt = () => `You read emails sent to the Black Desert Resort FF&E (furniture, fixtures & equipment) team and turn them into request tickets.
+Projects (with sub-projects and other names): ${SETTINGS.projects.filter((p) => !p.archived).map((p) => `${p.name}${p.subprojects?.length ? ` [sub-projects: ${p.subprojects.join(", ")}]` : ""}${p.aliases?.length ? ` (also called ${p.aliases.join(", ")})` : ""}`).join("; ")}. Use "Unknown" if the email doesn't say.
 Fill only what the email states or clearly implies; leave text fields empty when unknown. Quantity defaults to 1.
 Resolve relative dates against today's date. Ignore quoted earlier messages and signatures.
 photo_kind is "damage" when attachments would show damage or a problem, otherwise "concept".
@@ -59,6 +60,7 @@ async function readEmail(req) {
     out.text = b.text || b.body || b.TextBody || b["body-plain"] || "";
     out.html = b.html || b.HtmlBody || b["body-html"] || "";
     out.message_id = b.message_id || b.MessageID || b["Message-Id"] || "";
+    out.project_hint = String(b.project_hint || "");
     for (const a of b.attachments || b.Attachments || []) {
       const content = a.content || a.Content || a.contentBytes || a.ContentBytes;
       if (!content) continue;
@@ -107,8 +109,8 @@ async function extractWithAI(email, candidates, today) {
     max_tokens: 8000,
     betas: ["server-side-fallback-2026-07-01"],
     fallbacks: "default",
-    output_config: { effort: "low", format: { type: "json_schema", schema: EXTRACT_SCHEMA } },
-    system: SYSTEM,
+    output_config: { effort: "low", format: { type: "json_schema", schema: extractSchema() } },
+    system: systemPrompt(),
     messages: [{ role: "user", content }],
   });
   if (response.stop_reason === "refusal") throw new Error("refused");
@@ -146,17 +148,20 @@ export default async (req) => {
     if (seen) return json({ ok: true, already_received: true, email_request: seen });
   }
 
+  const { data: settings } = await admin.from("app_settings").select("projects, options").eq("id", 1).maybeSingle();
+  applySettings(settings);
   const today = todayISO();
   const since = new Date(Date.now() - 180 * 864e5).toISOString();
   const [{ data: requests }, { data: emails }] = await Promise.all([
-    admin.from("requests").select("id, ticket_no, project, buildings, rooms, item_needed, ffe_tag, spec, needed_by, status")
+    admin.from("requests").select("id, ticket_no, project, sub_project, buildings, rooms, item_needed, ffe_tag, spec, needed_by, status")
       .not("status", "in", "(Rejected,Cancelled)").gte("created_at", since),
-    admin.from("email_requests").select("id, project, buildings, rooms, item_needed, ffe_tag, spec, needed_by, status, from_email, subject")
+    admin.from("email_requests").select("id, project, sub_project, buildings, rooms, item_needed, ffe_tag, spec, needed_by, status, from_email, subject")
       .eq("status", "New").gte("received_at", since),
   ]);
 
   // Read the email: AI when configured, otherwise the built-in rules.
-  const rough = parseEmailHeuristic({ subject: email.subject, text: email.text }, today);
+  const hint = PROJECTS.includes(email.project_hint) ? email.project_hint : "";
+  const rough = parseEmailHeuristic({ subject: email.subject, text: email.text, hint }, today);
   const candidates = findMatches(rough, requests || [], 8, 0.15);
   let fields = rough;
   let aiDuplicate = null;
@@ -164,17 +169,20 @@ export default async (req) => {
     try {
       const ai = await extractWithAI(email, candidates, today);
       fields = { ...ai, details: ai.details || rough.details };
+      if (!fields.project) fields.project = rough.project || hint;
       aiDuplicate = ai.duplicate_of && ai.duplicate_of !== "none" ? { id: ai.duplicate_of, reason: ai.duplicate_reason } : null;
     } catch (err) {
       console.error("AI email reading failed, using built-in reader:", err.message);
     }
   }
 
+  if (fields.sub_project && !subProjects(fields.project).includes(fields.sub_project)) fields.sub_project = "";
+
   // Decide whether this is new, a duplicate of a ticket, or a repeat of an earlier email.
   const record = {
     message_id: email.message_id || null, from_email: email.from_email, from_name: email.from_name, subject: email.subject,
     body: stripQuoted(email.text).slice(0, 20000), project: fields.project || null, buildings: fields.buildings || null,
-    rooms: fields.rooms || null, item_needed: fields.item_needed || null, ffe_tag: fields.ffe_tag || null, spec: fields.spec || null,
+    sub_project: fields.sub_project || null, rooms: fields.rooms || null, item_needed: fields.item_needed || null, ffe_tag: fields.ffe_tag || null, spec: fields.spec || null,
     quantity: fields.quantity || 1, priority: fields.priority || "Normal", needed_by: fields.needed_by || null,
     details: fields.details || null, ai_summary: fields.summary || null, created_by: createdBy, status: "New",
   };
