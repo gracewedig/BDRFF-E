@@ -47,6 +47,10 @@ function createCloudStore() {
     },
     async signUp(name, email, password) {
       const data = check(await sb.auth.signUp({ email, password, options: { data: { full_name: name }, emailRedirectTo: location.origin } }));
+      // Supabase answers a sign-up for an already-confirmed email with an empty user (no identities).
+      if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        throw new Error("This email already has an account. Use Sign in instead, or Forgot password.");
+      }
       return data.session ? loadProfile(data.user) : null; // null => email confirmation required
     },
     // Confirms a new account with the code from its confirmation email.

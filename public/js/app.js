@@ -938,9 +938,18 @@ const SUBMIT = {
   },
   async signup(form) {
     const fd = new FormData(form);
-    const res = await guard(() => store.signUp(String(fd.get("name")).trim(), String(fd.get("email")).trim(), String(fd.get("password"))));
-    if (res === null) renderVerify(String(fd.get("email")).trim());
-    else if (res) { S.me = res; startApp(true); }
+    const email = String(fd.get("email")).trim();
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    try {
+      const res = await store.signUp(String(fd.get("name")).trim(), email, String(fd.get("password")));
+      if (res === null) renderVerify(email);
+      else { S.me = res; startApp(true); }
+    } catch (e) {
+      btn.disabled = false;
+      if (/already/i.test(e.message)) renderLogin("signin", e.message);
+      else toast(e.message || "Couldn't create the account", "err");
+    }
   },
   request(form) { submitRequest(form); },
   async "verify-code"(form) {
