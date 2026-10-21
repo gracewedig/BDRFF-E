@@ -37,8 +37,8 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 ### 1. Database — Supabase
 1. [supabase.com](https://supabase.com) → **New project**.
 2. **SQL Editor** → New query → paste all of `supabase/schema.sql` → **Run**. (It's safe to run again later.)
-3. **Project Settings → API**: copy the **Project URL**, the **anon public** key, and the **service_role** key (keep the service_role key secret, it only goes into Netlify).
-4. Put the URL and anon key into `public/js/config.js`.
+3. Copy the **Project URL** (the **Connect** button at the top) and from **Project Settings → API Keys** the **publishable** key (`sb_publishable_…`, or the legacy *anon* key) and the **secret** key (`sb_secret_…`, or the legacy *service_role* key). Keep the secret key private: it only goes into Netlify.
+4. Put the URL and publishable key into `public/js/config.js`.
 
 ### 2. Hosting — Netlify
 1. Push this folder to GitHub, then in Netlify: **Add new site → Import an existing project** → pick the repo → **Deploy** (settings come from `netlify.toml`).
@@ -47,8 +47,8 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 | Key | Value | Used for |
 |---|---|---|
 | `SUPABASE_URL` | Project URL | all functions |
-| `SUPABASE_ANON_KEY` | anon key | AI sheet assistant |
-| `SUPABASE_SERVICE_ROLE_KEY` | service_role key | invites, removing users, email intake |
+| `SUPABASE_ANON_KEY` | publishable (or anon) key | AI features: checks the person is signed in |
+| `SUPABASE_SERVICE_ROLE_KEY` | secret (or service_role) key | invites, removing users, email intake |
 | `INBOUND_EMAIL_SECRET` | any long random password you make up | email intake |
 | `ANTHROPIC_API_KEY` | from [console.anthropic.com](https://console.anthropic.com) | AI sheet assistant and smarter email reading (optional) |
 

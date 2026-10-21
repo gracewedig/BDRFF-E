@@ -4,8 +4,9 @@
 //
 // Leave them blank to run in Demo mode (data stays in each person's browser).
 export const CONFIG = {
-  SUPABASE_URL: "",
-  SUPABASE_ANON_KEY: "",
+  SUPABASE_URL: "https://yrmbhxnlfqpmkiwwemmf.supabase.co",
+  // Publishable key (Supabase → Project Settings → API Keys). Safe to publish.
+  SUPABASE_ANON_KEY: "sb_publishable_Yp-S4Hx-DZi5sNyufiSXNA_i9XgeU1R",
   // Storage bucket created by supabase/schema.sql
   PHOTO_BUCKET: "ffe-photos",
   // Netlify functions (see netlify/functions)
