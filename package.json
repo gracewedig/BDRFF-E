@@ -5,6 +5,7 @@
   "description": "Black Desert Resort FF&E request and approval tracker",
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/sdk": "^1.0.0"
+    "@anthropic-ai/sdk": "^1.0.0",
+    "@supabase/supabase-js": "^2.45.4"
   }
 }

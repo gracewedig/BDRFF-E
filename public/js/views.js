@@ -3,7 +3,7 @@
 // builder below, or manual edits in the Sheet Builder.
 import {
   FIELDS, FIELD_KEYS, FIELD_MAP, OP_KEYS, VALUELESS_OPS, DEFAULT_COLUMNS, PROJECTS, STATUSES,
-  OPEN_STATUSES, PRIORITIES, toRow, todayISO, addDaysISO, isOverdue,
+  OPEN_STATUSES, PRIORITIES, PROJECT_PATTERNS, toRow, todayISO, addDaysISO, isOverdue,
 } from "./fields.js";
 
 export function defaultSpec() {
@@ -110,11 +110,7 @@ export function localSpecFromPrompt(prompt) {
   const filters = [];
   const notes = [];
 
-  const projectWords = {
-    "The Terrace": /terrace/, "The Cove": /\bcove\b/, "Resort Center": /resort cent(er|re)/,
-    "Pickleball": /pickle\s?ball/, "Waterpark": /water\s?park/,
-  };
-  const projects = PROJECTS.filter((x) => projectWords[x].test(p));
+  const projects = PROJECTS.filter((x) => PROJECT_PATTERNS[x].test(p));
   if (projects.length) { filters.push({ field: "project", op: "in", value: projects.join(", ") }); notes.push(projects.join(" / ")); }
 
   const statusWords = {

@@ -6,87 +6,32 @@ import {
 } from "./fields.js";
 import { applyView, defaultSpec, sanitizeSpec, localSpecFromPrompt } from "./views.js";
 import { downloadWorkbook, downloadCsv, requestsTab, viewTab, actionsTab } from "./export.js";
-
-const app = document.getElementById("app");
-const modalRoot = document.getElementById("modal-root");
-const toastRoot = document.getElementById("toast-root");
-
-const S = {
-  me: null,
-  requests: [], actions: [], views: [], profiles: [],
-  route: "dashboard",
-  reqFilter: { q: "", project: "", status: "" },
-  actionFilter: "",
-  builder: { prompt: "", spec: defaultSpec(), viewId: null, pinned: false, busy: false, note: "", source: "" },
-  draft: { photos: [], project: "" },
-  modalId: null,
-};
-
-const isManager = () => S.me?.role === "manager";
-const ROLE_LABEL = { manager: "Manager", owner_relations: "Owner Relations" };
-
-/* ---------------------------------------------------------------- helpers */
-const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-");
-const fmtDate = (iso) => {
-  if (!iso) return "";
-  const d = new Date(iso.slice(0, 10) + "T12:00:00");
-  return isNaN(d) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-};
-const opt = (value, label, selected) => `<option value="${esc(value)}"${selected ? " selected" : ""}>${esc(label ?? value)}</option>`;
-const badge = (text, kind = slug(text)) => `<span class="badge b-${kind}">${esc(text)}</span>`;
-
-function toast(msg, kind = "ok") {
-  const el = document.createElement("div");
-  el.className = `toast t-${kind}`;
-  el.textContent = msg;
-  toastRoot.appendChild(el);
-  setTimeout(() => el.classList.add("out"), 3600);
-  setTimeout(() => el.remove(), 4000);
-}
-
-async function guard(fn, okMsg) {
-  try {
-    const out = await fn();
-    if (okMsg) toast(okMsg);
-    return out;
-  } catch (e) {
-    console.error(e);
-    toast(e.message || "Something went wrong", "err");
-    return undefined;
-  }
-}
-
-const ICONS = {
-  dashboard: '<path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z"/>',
-  requests: '<path d="M4 6h16M4 12h16M4 18h16"/>',
-  new: '<path d="M12 5v14M5 12h14"/>',
-  approvals: '<path d="M20 6 9 17l-5-5"/>',
-  actions: '<path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/>',
-  builder: '<path d="M3 3h18v18H3zM3 9h18M9 21V9"/>',
-  team: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
-  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
-  sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
-  download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
-  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
-  camera: '<path d="M4 8h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13.5" r="3.5"/>',
-  pin: '<path d="M12 17v5M5 17h14l-2-4V5H7v8z"/>',
-};
-const icon = (name, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+import { findMatches, DUP_THRESHOLD } from "./dedupe.js";
+import { S, isManager, ROLE_LABEL, hooks } from "./state.js";
+import { app, modalRoot, esc, slug, fmtDate, opt, badge, toast, guard, icon, tableHTML, initials } from "./ui.js";
+import * as inventory from "./inventory.js";
+import * as intake from "./intake.js";
+import * as email from "./email.js";
+import * as team from "./team.js";
 
 const NAV = [
   { id: "dashboard", label: "Dashboard" },
   { id: "requests", label: "All Requests" },
+  { id: "email", label: "Email Requests", badge: "email" },
   { id: "new", label: "New Request" },
-  { id: "approvals", label: "Approvals", manager: true },
+  { id: "approvals", label: "Approvals", manager: true, badge: "pending" },
+  { id: "inventory", label: "Inventory & Attic Stock" },
+  { id: "import", label: "Import Spreadsheet", manager: true },
   { id: "actions", label: "My Action Items" },
   { id: "builder", label: "Sheet Builder" },
   { id: "team", label: "Team & Roles", manager: true },
 ];
 const TITLES = {
-  dashboard: "Dashboard", requests: "All Requests", new: "New FF&E Request", approvals: "Approval Queue",
-  actions: "My Action Items", builder: "Custom Sheet Builder", team: "Team & Roles",
+  dashboard: "Dashboard", requests: "All Requests", email: "Email Requests", new: "New FF&E Request", approvals: "Approval Queue",
+  inventory: "Inventory & Attic Stock", import: "Import Spreadsheet", actions: "My Action Items", builder: "Custom Sheet Builder",
+  team: "Team & Roles",
 };
+const MODULES = [inventory, intake, email, team];
 
 function routeFromHash() {
   const r = location.hash.replace(/^#\/?/, "") || "dashboard";
@@ -98,6 +43,7 @@ function routeFromHash() {
 /* ------------------------------------------------------------------- boot */
 async function boot() {
   try { S.me = await store.currentUser(); } catch (e) { console.error(e); }
+  if (S.me && store.passwordSetupNeeded()) return renderSetPassword();
   if (!S.me) return renderLogin();
   startApp();
 }
@@ -112,23 +58,28 @@ async function startApp() {
 
 async function loadAll() {
   await guard(async () => {
-    const [requests, actions, views, profiles] = await Promise.all([
+    const [requests, actions, views, profiles, inv, moves, emails] = await Promise.all([
       store.listRequests(), store.listActions(), store.listViews(), isManager() ? store.listProfiles() : [],
+      store.listInventory(), store.listMoves(), store.listEmailRequests(),
     ]);
-    Object.assign(S, { requests, actions, views, profiles });
+    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails });
   });
 }
 
 async function onRemoteChange(kind) {
-  if (kind === "profiles") {
+  if (kind === "profiles" || kind === "all") {
     const fresh = await guard(() => store.currentUser());
-    if (fresh && fresh.role !== S.me.role) { S.me = fresh; toast(`Your role is now ${ROLE_LABEL[fresh.role]}`); }
-    if (isManager()) S.profiles = (await guard(() => store.listProfiles())) || S.profiles;
-  } else {
-    S.requests = (await guard(() => store.listRequests())) || S.requests;
+    if (!fresh) { toast("Your access was removed", "err"); setTimeout(() => CLICK.signout(), 1500); return; }
+    if (fresh.role !== S.me.role) { S.me = fresh; toast(`Your role is now ${ROLE_LABEL[fresh.role]}`); }
   }
-  // Don't wipe a half-filled form; just refresh the badges.
-  if (S.route === "new") updateBadges();
+  if (kind === "all") await loadAll();
+  else if (kind === "profiles") { if (isManager()) S.profiles = (await guard(() => store.listProfiles())) || S.profiles; }
+  else if (kind === "inventory") await guard(inventory.reloadInventory);
+  else if (kind === "email") S.emails = (await guard(() => store.listEmailRequests())) || S.emails;
+  else S.requests = (await guard(() => store.listRequests())) || S.requests;
+  // Don't wipe a half-filled form or a field someone is typing in; just refresh the badges.
+  const typing = document.activeElement?.matches?.("#app input, #app textarea, #app select");
+  if (S.route === "new" || typing) updateBadges();
   else render();
   if (S.modalId) openRequest(S.modalId, true);
 }
@@ -157,10 +108,10 @@ function renderLogin(mode = "signin", msg = "") {
         </div>
         <button class="btn link" data-act="demo-reset">Reset demo data</button>
       ` : `
-        <div class="tabs">
+        ${CONFIG.ALLOW_SIGNUP ? `<div class="tabs">
           <button class="tab ${mode === "signin" ? "on" : ""}" data-act="login-tab" data-mode="signin">Sign in</button>
           <button class="tab ${mode === "signup" ? "on" : ""}" data-act="login-tab" data-mode="signup">Create account</button>
-        </div>
+        </div>` : `<h2>Sign in</h2><p class="muted small">Ask a manager to invite you if you don't have an account yet.</p>`}
         ${msg ? `<p class="notice">${esc(msg)}</p>` : ""}
         <form data-form="${mode}" class="stack">
           ${mode === "signup" ? `<label>Full name<input name="name" required autocomplete="name"></label>` : ""}
@@ -174,10 +125,36 @@ function renderLogin(mode = "signin", msg = "") {
   </div>`;
 }
 
-const initials = (name) => String(name || "?").split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+
+// Shown after someone opens an invite or password-reset email.
+function renderSetPassword(msg = "") {
+  app.innerHTML = `
+  <div class="login">
+    <div class="login-art">
+      <div class="brand-mark lg">BD</div>
+      <h1>Black Desert Resort</h1>
+      <p class="tagline">FF&amp;E Tracker</p>
+    </div>
+    <div class="login-card">
+      <h2>Welcome${S.me?.full_name ? `, ${esc(S.me.full_name.split(" ")[0])}` : ""}</h2>
+      <p class="muted">Choose a password to finish setting up your account.</p>
+      ${msg ? `<p class="notice">${esc(msg)}</p>` : ""}
+      <form data-form="set-password" class="stack">
+        <label>New password<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+        <label>Confirm password<input name="confirm" type="password" required minlength="8" autocomplete="new-password"></label>
+        <button class="btn primary" type="submit">Save password &amp; continue</button>
+      </form>
+    </div>
+  </div>`;
+}
 
 /* ----------------------------------------------------------------- shell */
 function pendingCount() { return S.requests.filter((r) => r.status === "Pending").length; }
+function badgeCount(kind) {
+  if (kind === "email") return email.emailsToReview();
+  if (kind === "pending") return pendingCount() + email.emailsToReview();
+  return 0;
+}
 
 function render() {
   const nav = NAV.filter((n) => !n.manager || isManager());
@@ -187,7 +164,7 @@ function render() {
       <div class="brand"><div class="brand-mark">BD</div><div><strong>Black Desert</strong><small>FF&amp;E Tracker</small></div></div>
       <nav>${nav.map((n) => `
         <a href="#/${n.id}" class="nav-item ${S.route === n.id ? "on" : ""}">${icon(n.id)}<span>${n.label}</span>
-        ${n.id === "approvals" ? `<em class="count" data-badge="pending">${pendingCount() || ""}</em>` : ""}</a>`).join("")}
+        ${n.badge ? `<em class="count" data-badge="${n.badge}">${badgeCount(n.badge) || ""}</em>` : ""}</a>`).join("")}
       </nav>
       <div class="me">
         <span class="avatar">${esc(initials(S.me.full_name))}</span>
@@ -206,40 +183,9 @@ function render() {
 }
 
 function updateBadges() {
-  const el = app.querySelector('[data-badge="pending"]');
-  if (el) el.textContent = pendingCount() || "";
+  app.querySelectorAll("[data-badge]").forEach((el) => { el.textContent = badgeCount(el.dataset.badge) || ""; });
 }
 
-/* ---------------------------------------------------------------- tables */
-function cellHTML(key, row) {
-  const v = row[key];
-  if (key === "status") return badge(v);
-  if (key === "priority") return v === "Normal" ? esc(v) : badge(v, `p-${slug(v)}`);
-  if (key === "needed_by") return `<span class="${isOverdue(row) ? "overdue" : ""}">${esc(fmtDate(v))}</span>`;
-  if (FIELD_MAP[key]?.type === "date") return esc(fmtDate(v));
-  if (key === "ticket") return `<strong class="mono">${esc(v)}</strong>`;
-  if (key === "days_until_due" && v !== "" && !CLOSED_STATUSES.includes(row.status)) return `<span class="${v < 0 ? "overdue" : ""}">${esc(v)}</span>`;
-  return esc(v);
-}
-
-function tableHTML(columns, rows, { groupBy = "none", limit = 0, empty = "Nothing here yet." } = {}) {
-  if (!rows.length) return `<div class="empty">${esc(empty)}</div>`;
-  const shown = limit ? rows.slice(0, limit) : rows;
-  let lastGroup = null;
-  const body = shown.map((row) => {
-    let head = "";
-    if (groupBy !== "none" && row[groupBy] !== lastGroup) {
-      lastGroup = row[groupBy];
-      const n = rows.filter((r) => r[groupBy] === lastGroup).length;
-      head = `<tr class="group"><td colspan="${columns.length}">${esc(FIELD_MAP[groupBy].label)}: <strong>${esc(lastGroup === "" ? "(blank)" : FIELD_MAP[groupBy].type === "date" ? fmtDate(lastGroup) : lastGroup)}</strong> <span class="muted">· ${n}</span></td></tr>`;
-    }
-    return head + `<tr class="click" data-act="open-request" data-id="${esc(row._raw.id)}">${columns.map((c) => `<td data-label="${esc(c.label)}">${cellHTML(c.key, row)}</td>`).join("")}</tr>`;
-  }).join("");
-  return `<div class="table-wrap"><table class="grid">
-    <thead><tr>${columns.map((c) => `<th>${esc(c.label)}</th>`).join("")}</tr></thead>
-    <tbody>${body}</tbody></table></div>
-    ${limit && rows.length > limit ? `<p class="muted small more">Showing ${limit} of ${rows.length}</p>` : ""}`;
-}
 
 /* ------------------------------------------------------------- dashboard */
 function pageDashboard() {
@@ -251,6 +197,7 @@ function pageDashboard() {
   const doneMonth = rows.filter((r) => r.status === "Completed" && (r._raw.updated_at || r._raw.reviewed_at || "").slice(0, 7) === month);
   const pinned = S.views.filter((v) => v.pinned);
   const myOpenActions = S.actions.filter((a) => a.status !== "Done").length;
+  const lowStock = S.inventory.filter(inventory.isLow).length;
 
   return `
   <div class="kpis">
@@ -258,6 +205,8 @@ function pageDashboard() {
     <a class="kpi ${isManager() ? "link" : ""}" ${isManager() ? 'href="#/approvals"' : ""}><span>Awaiting approval</span><strong>${pendingCount()}</strong></a>
     <div class="kpi ${overdue.length ? "warn" : ""}"><span>Overdue</span><strong>${overdue.length}</strong></div>
     <div class="kpi"><span>Completed this month</span><strong>${doneMonth.length}</strong></div>
+    <a class="kpi link ${email.emailsToReview() ? "warn-soft" : ""}" href="#/email"><span>Emailed requests to review</span><strong>${email.emailsToReview()}</strong></a>
+    <a class="kpi link ${lowStock ? "warn" : ""}" href="#/inventory"><span>Low-stock items</span><strong>${lowStock}</strong></a>
     <a class="kpi link" href="#/actions"><span>My open action items</span><strong>${myOpenActions}</strong></a>
   </div>
 
@@ -450,6 +399,15 @@ async function submitRequest(form) {
   if (S.draft.photos.some((p) => !p.kind)) { err.textContent = "Choose “Concept image” or “Proof of damage” for every photo."; return; }
   err.textContent = "";
 
+  // Catch the same request being submitted twice before a manager has to review both.
+  const open = S.requests.filter((r) => !["Rejected", "Cancelled", "Completed"].includes(r.status));
+  const [dup] = findMatches(fields, open, 1);
+  if (dup && dup.score >= DUP_THRESHOLD && !confirm(
+    `This looks like ${ticketLabel(dup.item.ticket_no)} (${dup.item.status}): “${dup.item.item_needed}”, ${dup.reasons.join(", ")}.\n\nSubmit it anyway as a separate request?`)) {
+    openRequest(dup.item.id);
+    return;
+  }
+
   const btn = form.querySelector('button[type="submit"]');
   btn.disabled = true;
   btn.textContent = "Submitting…";
@@ -462,6 +420,7 @@ async function submitRequest(form) {
   toast(`${ticketLabel(created.ticket_no)} submitted for approval`);
   location.hash = "#/requests";
   openRequest(created.id);
+  email.linkEmailsToNewRequest(created);
 }
 
 /* ------------------------------------------------------------- approvals */
@@ -487,6 +446,7 @@ function pageApprovals() {
       </div>
     </div>`;
   return `
+    ${email.emailsToReview() ? `<a class="card callout-link" href="#/email">${icon("email")} <span><b>${email.emailsToReview()} emailed request${email.emailsToReview() === 1 ? "" : "s"}</b> waiting to be turned into tickets. Duplicates were already filed away.</span> <span class="btn small">Review</span></a>` : ""}
     <h2 class="section">Waiting for approval <span class="muted">(${pending.length})</span></h2>
     ${pending.length ? pending.map(card).join("") : `<div class="empty card">All caught up — nothing waiting for approval.</div>`}
     <h2 class="section">Approved &amp; in progress <span class="muted">(${active.length})</span></h2>
@@ -754,24 +714,10 @@ function exportView(spec, name) {
   downloadWorkbook(`${name} ${todayISO()}`, [viewTab(name, view)]);
 }
 
-/* ------------------------------------------------------------------- team */
-function pageTeam() {
-  return `
-  <p class="muted">Managers approve and reject requests and see everything. Owner Relations can submit requests, see everything, and keep their own action items. New sign-ups start as Owner Relations.</p>
-  <div class="card flush"><div class="table-wrap"><table class="grid">
-    <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Requests</th></tr></thead>
-    <tbody>${S.profiles.map((p) => `
-      <tr><td data-label="Name"><strong>${esc(p.full_name || "—")}</strong>${p.id === S.me.id ? ' <span class="muted small">(you)</span>' : ""}</td>
-      <td data-label="Email">${esc(p.email || "")}</td>
-      <td data-label="Role">${p.id === S.me.id ? esc(ROLE_LABEL[p.role]) : `<select data-change="set-role" data-id="${esc(p.id)}">${Object.entries(ROLE_LABEL).map(([k, l]) => opt(k, l, p.role === k)).join("")}</select>`}</td>
-      <td data-label="Requests">${S.requests.filter((r) => r.requested_by === p.id).length}</td></tr>`).join("")}
-    </tbody></table></div></div>`;
-}
-
-const PAGES = {
+const PAGES = Object.assign({
   dashboard: pageDashboard, requests: pageRequests, new: pageNew, approvals: pageApprovals,
-  actions: pageActions, builder: pageBuilder, team: pageTeam,
-};
+  actions: pageActions, builder: pageBuilder,
+}, ...MODULES.map((m) => m.pages));
 
 /* -------------------------------------------------------------- handlers */
 const CLICK = {
@@ -894,10 +840,6 @@ const CHANGE = {
   "spec-sort"(el) { S.builder.spec.sort_field = el.value; render(); },
   "spec-dir"(el) { S.builder.spec.sort_dir = el.value; render(); },
   "spec-group"(el) { S.builder.spec.group_by = el.value; render(); },
-  async "set-role"(el) {
-    const saved = await guard(() => store.setRole(el.dataset.id, el.value), "Role updated");
-    if (saved) S.profiles = S.profiles.map((p) => (p.id === saved.id ? saved : p));
-  },
 };
 
 const INPUT = {
@@ -918,6 +860,13 @@ const SUBMIT = {
     else if (res) { S.me = res; startApp(); }
   },
   request(form) { submitRequest(form); },
+  async "set-password"(form) {
+    const fd = new FormData(form);
+    const pw = String(fd.get("password"));
+    if (pw !== String(fd.get("confirm"))) { renderSetPassword("Those passwords don't match."); return; }
+    const ok = await guard(async () => { await store.setPassword(pw); return true; }, "Password saved");
+    if (ok) { history.replaceState(null, "", location.pathname); startApp(); }
+  },
   "add-filter"(form) {
     const fd = new FormData(form);
     const f = { field: String(fd.get("field")), op: String(fd.get("op")), value: String(fd.get("value") || "").trim() };
@@ -926,6 +875,15 @@ const SUBMIT = {
     render();
   },
 };
+
+// Page modules contribute their own handlers.
+for (const m of MODULES) {
+  Object.assign(CLICK, m.CLICK);
+  Object.assign(CHANGE, m.CHANGE);
+  Object.assign(INPUT, m.INPUT);
+  Object.assign(SUBMIT, m.SUBMIT);
+}
+Object.assign(hooks, { render, openRequest: (id) => openRequest(id), closeModal: () => closeModal() });
 
 function delegate(root) {
   root.addEventListener("click", (e) => {
@@ -949,11 +907,11 @@ function delegate(root) {
     const form = e.target.closest("[data-form]");
     if (!form) return;
     e.preventDefault();
-    SUBMIT[form.dataset.form]?.(form);
+    SUBMIT[form.dataset.form]?.(form, e.submitter);
   });
 }
 
 delegate(app);
 delegate(modalRoot);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.modalId) closeModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modalRoot.innerHTML) closeModal(); });
 boot();

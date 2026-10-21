@@ -1,81 +1,106 @@
 # Black Desert Resort — FF&E Tracker
 
-A web app for submitting, approving and tracking FF&E (furniture, fixtures & equipment) requests across the resort's projects: **The Terrace, The Cove, Resort Center, Pickleball, and Waterpark**.
+A web app for FF&E (furniture, fixtures & equipment) requests, approvals, inventory and attic stock across the resort's projects: **The Terrace, The Cove, Resort Center, Pickleball, and Waterpark**.
 
 ## What's in it
 
-| Who | What they can do |
+| Area | What it does |
 |---|---|
-| **Managers** | See every request · approve or reject (a note is required to reject) · move approved work to *In Progress* and *Completed* · approval queue with a pending count · change people's roles |
-| **Owner Relations** | See every request · submit requests · keep a private **action-item checklist** (status, priority, due date, linked ticket, category, notes) · export their own sheet or a **combined workbook** (overall sheet + their own tab) |
-| **Everyone** | **Sheet Builder with an AI assistant**: describe the spreadsheet you want ("open Cove requests due this month grouped by building"), adjust columns/filters/sorting, save it, **pin it to the dashboard** so it's always visible, and export it to Excel or CSV |
+| **Requests** | Detailed tickets: project, building(s), room(s), what's needed, FF&E tag/spec, quantity, needed-by date, and photos marked *Concept image* or *Proof of damage*. Each gets a number like `BDR-0012`. If someone submits something that's already been requested, the app shows the matching ticket first. |
+| **Email Requests** (separate tab) | Emails sent to an FF&E inbox are read automatically into draft tickets (photos included). Anything already submitted in the app, or already emailed, is filed under **Auto-matched duplicates**, so managers review each request once. Managers turn the rest into tickets with one click. Anyone can also **paste an email**. |
+| **Approvals** (managers) | Approve, or reject with a note, then move work to *In Progress* → *Completed*. The badge counts pending tickets plus emails waiting for review. |
+| **Inventory & Attic Stock** | Clean per-project views (attic stock vs. inventory, low-stock warnings against par levels). **Take out** stock and optionally record where it went (project, building, room, ticket, note), or return/add stock. Every move goes into a movement log. Export to Excel with one tab per project plus the log. |
+| **Import Spreadsheet** (managers) | Upload Excel/CSV for inventory or requests. Rows are sorted into projects by a Project column, the tab name (a tab called “Cove Attic” → The Cove, Attic Stock), or project names in the row. Columns are matched automatically. You preview everything first: new items, items that update existing counts, requests that are already open, and rows that need a project. |
+| **My Action Items** | A private checklist (status, priority, due date, linked ticket, notes). Export your sheet, or a combined workbook with the overall sheet plus your tab. |
+| **Sheet Builder** | Describe a spreadsheet in plain English and the AI assistant builds it. Pin it to your dashboard and export it any time. |
+| **Team & Roles** (managers) | **Invite people by email**, change roles, re-send invites, and **remove people**. Removing someone keeps the requests they submitted on record. |
 
-**Request tickets** require: project · building(s) · room number(s) · what's needed · FF&E tag (plus optional specification) · quantity · needed-by date · at least one photo, each marked as **Concept image** or **Proof of damage**. Priority and extra details are optional. Each ticket gets a number like `BDR-0012`.
+**Roles:** *Managers* approve, review emails, manage inventory, import spreadsheets and manage the team. *Owner Relations* see everything, submit requests, take stock out (logged under their name), and keep their own action items. The database enforces these rules, not just the screens.
 
-Changes show up for everyone immediately (live updates), and it works on phones — the photo button opens the camera.
+## Try it first (Demo mode)
 
-## Folder layout
+With `public/js/config.js` left blank, the app runs in **Demo mode** with sample data: tickets, inventory, and three emails (one new, one auto-matched duplicate, one newsletter that was filtered out). Pick a Manager or Owner Relations user and click around. Demo data lives only in that browser.
 
-```
-public/                 ← the website (this is what Netlify publishes)
-  index.html
-  css/styles.css
-  js/config.js          ← paste your Supabase keys here
-  js/app.js, store.js, fields.js, views.js, export.js
-netlify/functions/ai-sheet.mjs   ← AI assistant (runs on Netlify, keeps the API key secret)
-supabase/schema.sql     ← database setup, run once
-netlify.toml, package.json
-```
+Preview on your computer: `npx serve public` in this folder, then open the address it prints.
 
-## Try it right away (Demo mode)
+## Going live (about 30 minutes)
 
-With `public/js/config.js` left blank, the app runs in **Demo mode**: pick a sample Manager or Owner Relations user and click around. Demo data lives only in that browser, so it is **not** shared between people. Use it to try things out, then do the setup below for real multi-user use.
+You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hosting and the server functions).
 
-To preview on your computer: open a terminal in this folder and run `npx serve public`, then visit the address it prints. (Opening `index.html` by double-clicking won't work, because browsers block the app's scripts from `file://`.)
+### 1. Database — Supabase
+1. [supabase.com](https://supabase.com) → **New project**.
+2. **SQL Editor** → New query → paste all of `supabase/schema.sql` → **Run**. (It's safe to run again later.)
+3. **Project Settings → API**: copy the **Project URL**, the **anon public** key, and the **service_role** key (keep the service_role key secret, it only goes into Netlify).
+4. Put the URL and anon key into `public/js/config.js`.
 
-## Going live for the whole team (about 20 minutes)
+### 2. Hosting — Netlify
+1. Push this folder to GitHub, then in Netlify: **Add new site → Import an existing project** → pick the repo → **Deploy** (settings come from `netlify.toml`).
+2. **Site configuration → Environment variables**, add:
 
-Several people using it at once needs a shared database. This uses **Supabase** (free tier is fine) for logins, data and photos, and **Netlify** to host the site.
+| Key | Value | Used for |
+|---|---|---|
+| `SUPABASE_URL` | Project URL | all functions |
+| `SUPABASE_ANON_KEY` | anon key | AI sheet assistant |
+| `SUPABASE_SERVICE_ROLE_KEY` | service_role key | invites, removing users, email intake |
+| `INBOUND_EMAIL_SECRET` | any long random password you make up | email intake |
+| `ANTHROPIC_API_KEY` | from [console.anthropic.com](https://console.anthropic.com) | AI sheet assistant and smarter email reading (optional) |
 
-### 1. Create the database (Supabase)
-1. Sign up at [supabase.com](https://supabase.com) → **New project**. Pick a name and password, and choose a US region.
-2. Open **SQL Editor** → **New query**, paste all of `supabase/schema.sql`, and click **Run**.
-3. Go to **Project Settings → API** and copy the **Project URL** and the **anon public** key.
-4. Paste both into `public/js/config.js`:
-   ```js
-   SUPABASE_URL: "https://xxxx.supabase.co",
-   SUPABASE_ANON_KEY: "eyJhbGciOi...",
-   ```
-   The anon key is meant to be public; the database's security rules protect the data.
-5. Optional: under **Authentication → Providers → Email**, turn off "Confirm email" if you don't want people to have to confirm their address before signing in.
+3. **Deploys → Trigger deploy**.
 
-### 2. Put the site on Netlify
-**Recommended: connect a GitHub repo** (this is needed for the AI assistant):
-1. Push this folder to GitHub.
-2. In Netlify: **Add new site → Import an existing project** → choose the repo. The build settings come from `netlify.toml`, so you don't need to change anything. Click **Deploy**.
+(Dragging just the `public` folder onto Netlify Drop also works for a quick look, but invites, email intake and the AI features need the Git deploy.)
 
-**Quick alternative: drag and drop.** Drag the **`public`** folder onto [app.netlify.com/drop](https://app.netlify.com/drop). Everything works except the AI assistant, which falls back to a built-in offline builder (it understands projects, statuses, "overdue", "next 14 days", "my requests", "group by building", and so on).
-
-### 3. Turn on the AI assistant
-In Netlify: **Site configuration → Environment variables**, add:
-
-| Key | Value |
-|---|---|
-| `ANTHROPIC_API_KEY` | an API key from [console.anthropic.com](https://console.anthropic.com) |
-| `SUPABASE_URL` | same Project URL as above |
-| `SUPABASE_ANON_KEY` | same anon key as above |
-
-Then redeploy (**Deploys → Trigger deploy**). Only signed-in staff can use the assistant (it checks their Supabase login). It uses Claude Opus 5.5 at low effort, so each sheet costs a fraction of a cent. If it's ever unreachable, the app automatically uses the offline builder instead.
-
-### 4. Make yourself a manager
-1. Open your new Netlify site and **Create account**.
-2. In Supabase **SQL Editor**, run (with your email):
+### 3. Logins & invites
+1. In Supabase → **Authentication → URL Configuration**, set **Site URL** to your Netlify address (e.g. `https://bdr-ffe.netlify.app`) and add it under **Redirect URLs**. Invite and password-reset links send people here to choose a password.
+2. Open your site, **Create account**, then make yourself a manager in the Supabase SQL Editor:
    ```sql
    update public.profiles set role = 'manager' where email = 'you@yourcompany.com';
    ```
-3. Sign out and back in. From now on, use **Team & Roles** in the app to promote other managers. Everyone who signs up starts as Owner Relations.
+3. Invite everyone else from **Team & Roles**.
+4. Optional, recommended once everyone is invited: in Supabase → **Authentication → Providers/Sign In**, turn off “Allow new users to sign up”, and set `ALLOW_SIGNUP: false` in `config.js`, so only invited people can get in.
+
+### 4. Hook up email
+Email intake address (shown to managers on the Email Requests tab):
+```
+https://YOUR-SITE.netlify.app/.netlify/functions/email-inbound?key=YOUR_INBOUND_EMAIL_SECRET
+```
+Pick whichever fits your email:
+
+- **Outlook / Microsoft 365 (Power Automate):** create a flow *When a new email arrives (V3)* on a shared mailbox like `ffe@…` (Include Attachments: Yes) → **HTTP** action, method POST, the URL above, header `Content-Type: application/json`, body:
+  ```json
+  {
+    "from_email": "@{triggerOutputs()?['body/from']}",
+    "subject": "@{triggerOutputs()?['body/subject']}",
+    "html": "@{triggerOutputs()?['body/body']}",
+    "message_id": "@{triggerOutputs()?['body/internetMessageId']}",
+    "attachments": @{triggerOutputs()?['body/attachments']}
+  }
+  ```
+- **Gmail / Google Workspace:** a Zapier or Make scenario *New email* → *Webhook POST* with the same JSON fields (`from_email`, `from_name`, `subject`, `text`, `message_id`, `attachments: [{name, content_type, content (base64)}]`).
+- **A dedicated inbound address:** Postmark Inbound, SendGrid Inbound Parse or Mailgun Routes can post straight to the URL above; their formats are recognized automatically.
+
+Each email is checked against open tickets and other waiting emails. Matches go to **Auto-matched duplicates** (with the reason, e.g. “same FF&E tag, same room”), and a manager can click **Not a duplicate** if the app got it wrong. Emails that aren't FF&E requests (newsletters etc.) go to **Dismissed**. The same email delivered twice is only stored once. When someone later submits the same request in the app, the waiting email is filed as its duplicate automatically.
+
+## Folder layout
+```
+public/                       the website (what Netlify publishes)
+  index.html, css/styles.css
+  js/config.js                Supabase keys + settings
+  js/app.js                   shell, dashboard, requests, approvals, action items, sheet builder
+  js/inventory.js             inventory & attic stock
+  js/intake.js                spreadsheet import
+  js/email.js                 email requests
+  js/team.js                  team, invites, roles
+  js/dedupe.js                duplicate matching (also used by the email function)
+  js/emailparse.js            built-in email reader
+  js/store.js                 data access (Supabase or demo)
+netlify/functions/
+  ai-sheet.mjs                AI sheet assistant
+  email-inbound.mjs           email intake
+  manage-users.mjs            invites and removing users
+supabase/schema.sql           database, security rules, photo storage
+```
 
 ## Notes
-- **Security:** Owner Relations can't approve anything. The database itself enforces this, not only the screen. Action items and saved sheets are private to each person; managers can read action items. Photos are stored privately and shown through links that expire after an hour.
-- **Exports:** Excel files have one tab per sheet, with auto-filters and sized columns. The **Combined workbook** (My Action Items page) contains *Overall Requests*, *your action items*, and each of your saved sheets as separate tabs.
-- **Photos** are resized automatically before upload, so they load quickly and stay small.
+- **AI:** uses Claude Opus 5.5 at low effort, a fraction of a cent per email or sheet. Without `ANTHROPIC_API_KEY`, the built-in rules handle emails and sheets instead.
+- **Photos** are resized before upload and stored privately, with view links that expire after an hour.
+- **Spreadsheet tips:** a *Project* column, or one tab per project, gives the cleanest import. Download the templates from the Import page.

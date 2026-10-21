@@ -9,6 +9,8 @@ create table if not exists public.profiles (
   full_name text,
   email text,
   role text not null default 'owner_relations' check (role in ('manager', 'owner_relations')),
+  invited_at timestamptz,
+  invited_by uuid,
   created_at timestamptz not null default now()
 );
 
@@ -48,9 +50,11 @@ create table if not exists public.requests (
   photos jsonb not null default '[]'::jsonb,      -- [{ path, kind: 'concept' | 'damage', name }]
   status text not null default 'Pending'
     check (status in ('Pending', 'Approved', 'In Progress', 'Completed', 'Rejected', 'Cancelled')),
-  requested_by uuid not null default auth.uid() references public.profiles (id),
+  requested_by uuid default auth.uid() references public.profiles (id) on delete set null,
   requester_name text,
-  reviewed_by uuid references public.profiles (id),
+  source text not null default 'app' check (source in ('app', 'email', 'import')),
+  source_ref uuid,
+  reviewed_by uuid references public.profiles (id) on delete set null,
   reviewer_name text,
   review_note text,
   reviewed_at timestamptz,
@@ -65,13 +69,13 @@ begin
   if public.is_manager() then
     return new;
   end if;
-  if old.requested_by <> auth.uid() or old.status <> 'Pending' then
+  if old.requested_by is distinct from auth.uid() or old.status <> 'Pending' then
     raise exception 'Only managers can change this request';
   end if;
   if new.status not in ('Pending', 'Cancelled')
      or new.reviewed_by is distinct from old.reviewed_by
      or new.review_note is distinct from old.review_note
-     or new.requested_by <> old.requested_by then
+     or new.requested_by is distinct from old.requested_by then
     raise exception 'Requesters can only edit or cancel their own pending requests';
   end if;
   return new;
@@ -80,6 +84,122 @@ end $$;
 drop trigger if exists guard_request_update on public.requests;
 create trigger guard_request_update before update on public.requests
   for each row execute function public.guard_request_update();
+
+-- ------------------------------------------------- inventory & attic stock
+create table if not exists public.inventory_items (
+  id uuid primary key default gen_random_uuid(),
+  project text not null check (project in ('The Terrace', 'The Cove', 'Resort Center', 'Pickleball', 'Waterpark')),
+  stock_type text not null default 'Attic Stock' check (stock_type in ('Attic Stock', 'Inventory')),
+  item_name text not null,
+  ffe_tag text,
+  category text,
+  description text,
+  location text,
+  quantity int not null default 0 check (quantity >= 0),
+  unit text not null default 'ea',
+  min_qty int,
+  vendor text,
+  notes text,
+  created_by uuid default auth.uid() references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.inventory_moves (
+  id uuid primary key default gen_random_uuid(),
+  item_id uuid not null references public.inventory_items (id) on delete cascade,
+  direction text not null check (direction in ('out', 'in')),
+  quantity int not null check (quantity > 0),
+  qty_after int not null,
+  dest_project text,
+  dest_building text,
+  dest_room text,
+  linked_ticket text,
+  note text,
+  moved_by uuid default auth.uid() references public.profiles (id) on delete set null,
+  moved_by_name text,
+  moved_at timestamptz not null default now()
+);
+create index if not exists inventory_moves_item on public.inventory_moves (item_id, moved_at desc);
+
+-- Any signed-in staff member can take stock out (or put it back); the count and
+-- the log entry are written together so they can't drift apart.
+create or replace function public.record_inventory_move(
+  p_item uuid, p_direction text, p_qty int,
+  p_dest_project text default null, p_dest_building text default null, p_dest_room text default null,
+  p_ticket text default null, p_note text default null)
+returns public.inventory_items language plpgsql security definer set search_path = public as $$
+declare
+  it public.inventory_items;
+begin
+  if auth.uid() is null then raise exception 'Please sign in'; end if;
+  if p_direction not in ('out', 'in') then raise exception 'Direction must be out or in'; end if;
+  if p_qty is null or p_qty < 1 then raise exception 'Quantity must be at least 1'; end if;
+  select * into it from public.inventory_items where id = p_item for update;
+  if not found then raise exception 'Item not found'; end if;
+  if p_direction = 'out' and it.quantity < p_qty then
+    raise exception 'Only % on hand', it.quantity;
+  end if;
+  update public.inventory_items
+     set quantity = quantity + case when p_direction = 'out' then -p_qty else p_qty end, updated_at = now()
+   where id = p_item returning * into it;
+  insert into public.inventory_moves (item_id, direction, quantity, qty_after, dest_project, dest_building, dest_room,
+                                      linked_ticket, note, moved_by, moved_by_name)
+  values (p_item, p_direction, p_qty, it.quantity, nullif(p_dest_project, ''), nullif(p_dest_building, ''),
+          nullif(p_dest_room, ''), nullif(p_ticket, ''), nullif(p_note, ''), auth.uid(),
+          (select full_name from public.profiles where id = auth.uid()));
+  return it;
+end $$;
+revoke all on function public.record_inventory_move from public, anon;
+grant execute on function public.record_inventory_move to authenticated;
+
+-- ---------------------------------------------------------- email requests
+create table if not exists public.email_requests (
+  id uuid primary key default gen_random_uuid(),
+  message_id text unique,
+  received_at timestamptz not null default now(),
+  from_email text,
+  from_name text,
+  subject text,
+  body text,
+  attachments jsonb not null default '[]'::jsonb,   -- [{ path, kind, name }]
+  project text,
+  buildings text,
+  rooms text,
+  item_needed text,
+  ffe_tag text,
+  spec text,
+  quantity int default 1,
+  priority text default 'Normal',
+  needed_by date,
+  details text,
+  ai_summary text,
+  status text not null default 'New' check (status in ('New', 'Duplicate', 'Converted', 'Dismissed')),
+  duplicate_of uuid references public.requests (id) on delete set null,
+  duplicate_of_email uuid references public.email_requests (id) on delete set null,
+  duplicate_reason text,
+  match_score numeric,
+  converted_request uuid references public.requests (id) on delete set null,
+  reviewed_by uuid references public.profiles (id) on delete set null,
+  reviewer_name text,
+  reviewed_at timestamptz,
+  created_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+-- When someone submits a ticket in the app that an emailed request already
+-- describes, the email copy is filed as a duplicate so managers review it once.
+create or replace function public.link_email_duplicate(p_email uuid, p_request uuid, p_reason text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'Please sign in'; end if;
+  update public.email_requests
+     set status = 'Duplicate', duplicate_of = p_request,
+         duplicate_reason = coalesce(p_reason, 'Also submitted in the app')
+   where id = p_email and status = 'New';
+end $$;
+revoke all on function public.link_email_duplicate from public, anon;
+grant execute on function public.link_email_duplicate to authenticated;
 
 -- ------------------------------------------------------------ action items
 create table if not exists public.action_items (
@@ -113,6 +233,25 @@ alter table public.profiles enable row level security;
 alter table public.requests enable row level security;
 alter table public.action_items enable row level security;
 alter table public.saved_views enable row level security;
+alter table public.inventory_items enable row level security;
+alter table public.inventory_moves enable row level security;
+alter table public.email_requests enable row level security;
+
+drop policy if exists "everyone sees inventory" on public.inventory_items;
+create policy "everyone sees inventory" on public.inventory_items for select to authenticated using (true);
+drop policy if exists "managers manage inventory" on public.inventory_items;
+create policy "managers manage inventory" on public.inventory_items for all to authenticated
+  using (public.is_manager()) with check (public.is_manager());
+drop policy if exists "everyone sees inventory log" on public.inventory_moves;
+create policy "everyone sees inventory log" on public.inventory_moves for select to authenticated using (true);
+
+drop policy if exists "everyone sees email requests" on public.email_requests;
+create policy "everyone sees email requests" on public.email_requests for select to authenticated using (true);
+drop policy if exists "managers review email requests" on public.email_requests;
+create policy "managers review email requests" on public.email_requests for update to authenticated
+  using (public.is_manager()) with check (public.is_manager());
+drop policy if exists "managers delete email requests" on public.email_requests;
+create policy "managers delete email requests" on public.email_requests for delete to authenticated using (public.is_manager());
 
 drop policy if exists "profiles readable by staff" on public.profiles;
 create policy "profiles readable by staff" on public.profiles for select to authenticated using (true);
@@ -124,7 +263,7 @@ drop policy if exists "everyone sees requests" on public.requests;
 create policy "everyone sees requests" on public.requests for select to authenticated using (true);
 drop policy if exists "staff submit requests" on public.requests;
 create policy "staff submit requests" on public.requests for insert to authenticated
-  with check (requested_by = auth.uid() and status = 'Pending' and reviewed_by is null);
+  with check (requested_by = auth.uid() and ((status = 'Pending' and reviewed_by is null) or public.is_manager()));
 drop policy if exists "managers or requester update" on public.requests;
 create policy "managers or requester update" on public.requests for update to authenticated
   using (public.is_manager() or (requested_by = auth.uid() and status = 'Pending'));
@@ -163,12 +302,17 @@ begin
 exception when duplicate_object then null;
 end $$;
 do $$
+declare t text;
 begin
-  alter publication supabase_realtime add table public.profiles;
-exception when duplicate_object then null;
+  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests'] loop
+    begin
+      execute format('alter publication supabase_realtime add table public.%I', t);
+    exception when duplicate_object then null;
+    end;
+  end loop;
 end $$;
 
 -- ----------------------------------------------------- make the first manager
 -- After you create your own account in the app, run this once (with your email):
 --   update public.profiles set role = 'manager' where email = 'you@blackdesertresort.com';
--- From then on, managers can change everyone else's role inside the app (Team & Roles).
+-- From then on, managers invite, remove and change roles for everyone else inside the app (Team & Roles).

@@ -8,6 +8,11 @@ export const CONFIG = {
   SUPABASE_ANON_KEY: "",
   // Storage bucket created by supabase/schema.sql
   PHOTO_BUCKET: "ffe-photos",
-  // Netlify function that powers the AI spreadsheet assistant
+  // Netlify functions (see netlify/functions)
   AI_ENDPOINT: "/.netlify/functions/ai-sheet",
+  EMAIL_ENDPOINT: "/.netlify/functions/email-inbound",
+  USERS_ENDPOINT: "/.netlify/functions/manage-users",
+  // Show "Create account" on the sign-in page. Set to false once managers invite
+  // everyone by email (and turn off sign-ups in Supabase, see README).
+  ALLOW_SIGNUP: true,
 };

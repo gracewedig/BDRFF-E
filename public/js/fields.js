@@ -8,6 +8,24 @@ export const CLOSED_STATUSES = ["Completed", "Rejected", "Cancelled"];
 export const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 export const ACTION_STATUSES = ["Not Started", "In Progress", "Waiting", "Done"];
 export const PHOTO_KINDS = { concept: "Concept image", damage: "Proof of damage" };
+export const STOCK_TYPES = ["Attic Stock", "Inventory"];
+export const SOURCES = { app: "App", email: "Email", import: "Spreadsheet" };
+
+// How each project tends to be written in emails and spreadsheets.
+export const PROJECT_PATTERNS = {
+  "The Terrace": /terrace/i,
+  "The Cove": /\bcove\b/i,
+  "Resort Center": /resort\s*cent(er|re)|\brc\b/i,
+  "Pickleball": /pickle\s*ball/i,
+  "Waterpark": /water\s*park/i,
+};
+
+// Returns the project a piece of text refers to, or "" when it names none or several.
+export function matchProject(text) {
+  const s = String(text ?? "");
+  const hits = PROJECTS.filter((p) => PROJECT_PATTERNS[p].test(s));
+  return hits.length === 1 ? hits[0] : "";
+}
 
 // Columns available in the overall spreadsheet and in custom views.
 export const FIELDS = [
@@ -31,6 +49,7 @@ export const FIELDS = [
   { key: "reviewed_at", label: "Reviewed On", type: "date" },
   { key: "concept_photos", label: "Concept Photos", type: "number" },
   { key: "damage_photos", label: "Damage Photos", type: "number" },
+  { key: "source", label: "Source", type: "enum", options: Object.values(SOURCES) },
 ];
 export const FIELD_KEYS = FIELDS.map((f) => f.key);
 export const FIELD_MAP = Object.fromEntries(FIELDS.map((f) => [f.key, f]));
@@ -105,6 +124,7 @@ export function toRow(r, today = todayISO()) {
     reviewed_at: (r.reviewed_at || "").slice(0, 10),
     concept_photos: photos.filter((p) => p.kind === "concept").length,
     damage_photos: photos.filter((p) => p.kind === "damage").length,
+    source: SOURCES[r.source] || SOURCES.app,
   };
 }
 
