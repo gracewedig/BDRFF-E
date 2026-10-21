@@ -46,8 +46,11 @@ function createCloudStore() {
       return loadProfile(data.user);
     },
     async signUp(name, email, password) {
-      const data = check(await sb.auth.signUp({ email, password, options: { data: { full_name: name } } }));
+      const data = check(await sb.auth.signUp({ email, password, options: { data: { full_name: name }, emailRedirectTo: location.origin } }));
       return data.session ? loadProfile(data.user) : null; // null => email confirmation required
+    },
+    async resendConfirmation(email) {
+      check(await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: location.origin } }));
     },
     async resetPassword(email) {
       check(await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin }));

@@ -124,7 +124,8 @@ async function onRemoteChange(kind) {
 }
 
 /* ------------------------------------------------------------------ login */
-function renderLogin(mode = "signin", msg = "") {
+// resendTo: email that still needs confirming; shows a "Resend confirmation email" button.
+function renderLogin(mode = "signin", msg = "", resendTo = "") {
   const demo = store.mode === "demo";
   app.innerHTML = `
   <div class="login">
@@ -152,9 +153,10 @@ function renderLogin(mode = "signin", msg = "") {
           <button class="tab ${mode === "signup" ? "on" : ""}" data-act="login-tab" data-mode="signup">Create account</button>
         </div>` : `<h2>Sign in</h2><p class="muted small">Ask a manager to invite you if you don't have an account yet.</p>`}
         ${msg ? `<p class="notice">${esc(msg)}</p>` : ""}
+        ${resendTo ? `<button type="button" class="btn" data-act="resend-confirm" data-email="${esc(resendTo)}">Resend confirmation email</button>` : ""}
         <form data-form="${mode}" class="stack">
           ${mode === "signup" ? `<label>Full name<input name="name" required autocomplete="name"></label>` : ""}
-          <label>Work email<input name="email" type="email" required autocomplete="email"></label>
+          <label>Work email<input name="email" type="email" required autocomplete="email" value="${esc(resendTo)}"></label>
           <label>Password<input name="password" type="password" required minlength="8" autocomplete="${mode === "signup" ? "new-password" : "current-password"}"></label>
           <button class="btn primary" type="submit">${mode === "signup" ? "Create account" : "Sign in"}</button>
           ${mode === "signin" ? `<button type="button" class="btn link" data-act="forgot">Forgot password?</button>` : `<p class="muted small">New accounts start as Owner Relations. A manager can change your role under Team &amp; Roles.</p>`}
@@ -767,6 +769,9 @@ const CLICK = {
   async "demo-login"(el) { S.me = await store.signInAs(el.dataset.id); startApp(true); },
   "demo-reset"() { store.resetDemo(); toast("Demo data reset"); renderLogin(); },
   "login-tab"(el) { renderLogin(el.dataset.mode); },
+  async "resend-confirm"(el) {
+    await guard(() => store.resendConfirmation(el.dataset.email), `Confirmation email sent to ${el.dataset.email}`);
+  },
   async forgot() {
     const email = app.querySelector('input[name="email"]')?.value.trim();
     if (!email) { toast("Enter your email first", "err"); return; }
@@ -894,13 +899,20 @@ const INPUT = {
 const SUBMIT = {
   async signin(form) {
     const fd = new FormData(form);
-    const me = await guard(() => store.signIn(String(fd.get("email")).trim(), String(fd.get("password"))));
-    if (me) { S.me = me; startApp(true); }
+    const email = String(fd.get("email")).trim();
+    try {
+      S.me = await store.signIn(email, String(fd.get("password")));
+      startApp(true);
+    } catch (e) {
+      if (/not confirmed/i.test(e.message)) {
+        renderLogin("signin", "Your email isn't confirmed yet. Click the link in the confirmation email (check Junk too), then sign in.", email);
+      } else toast(e.message || "Couldn't sign in", "err");
+    }
   },
   async signup(form) {
     const fd = new FormData(form);
     const res = await guard(() => store.signUp(String(fd.get("name")).trim(), String(fd.get("email")).trim(), String(fd.get("password"))));
-    if (res === null) renderLogin("signin", "Account created. Check your email to confirm it, then sign in.");
+    if (res === null) renderLogin("signin", "Account created. Check your email (and Junk) to confirm it, then sign in.", String(fd.get("email")).trim());
     else if (res) { S.me = res; startApp(true); }
   },
   request(form) { submitRequest(form); },
