@@ -1,0 +1,10 @@
+{
+  "name": "bdr-ffe-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Black Desert Resort FF&E request and approval tracker",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.0.0"
+  }
+}
