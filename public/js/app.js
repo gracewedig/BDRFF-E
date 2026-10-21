@@ -176,7 +176,7 @@ function renderVerify(email, msg = "") {
     </div>
     <div class="login-card">
       <h2>Check your email</h2>
-      <p class="muted">We sent a verification code to <b>${esc(email)}</b>. Enter it below to finish creating your account.</p>
+      <p class="muted">We sent a confirmation email to <b>${esc(email)}</b>. Enter the code from it below, or just click the confirm link in the email, to finish creating your account.</p>
       ${msg ? `<p class="notice">${esc(msg)}</p>` : ""}
       <form data-form="verify-code" class="stack">
         <input type="hidden" name="email" value="${esc(email)}">
