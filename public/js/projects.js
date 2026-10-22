@@ -7,6 +7,7 @@ import {
 import { S, isManager, hooks } from "./state.js";
 import { esc, slug, badge, toast, guard, icon, tableHTML } from "./ui.js";
 import { isLow } from "./inventory.js";
+import { filesListHTML } from "./files.js";
 
 const enc = encodeURIComponent;
 export const areaHref = (name) => `#/area/${enc(name)}`;
@@ -108,6 +109,11 @@ export function pageProject() {
     <div class="btn-row"><a class="btn small" href="#/dashboard">Dashboard</a><a class="btn small primary" href="#/new">${icon("new")} New request</a></div>
   </div>
   ${subProjectCards()}
+  <div class="section-head">
+    <h2 class="section">Files &amp; spreadsheets</h2>
+    <a class="btn small" href="#/files">${icon("import")} Upload or see all</a>
+  </div>
+  <div class="card flush">${filesListHTML({ limit: 5, empty: "No files yet. Upload spreadsheets and PDFs from Files & Assistant or from any sub-project page." })}</div>
   ${noSub && AREAS.length ? `<p class="muted small">${noSub} request${noSub === 1 ? " isn't" : "s aren't"} assigned to a sub-project. <a href="#/requests">See all requests</a>.</p>` : ""}
   ${isManager() ? `
   <form class="inline-add big" data-form="add-sub" data-tour="add-sub">
@@ -153,6 +159,11 @@ export function pageArea() {
     </div>
   </div>
   <div class="card flush">${tableHTML(cols, openRows, { empty: `No open requests for ${name}.` })}</div>
+  <div class="section-head">
+    <h2 class="section">Files &amp; spreadsheets</h2>
+    <button class="btn small primary" data-act="upload-here" data-sub="${esc(name)}" data-tour="upload-here">${icon("import")} Upload spreadsheet or PDF here</button>
+  </div>
+  <div class="card flush">${filesListHTML({ sub: name, empty: `No files for ${name} yet. Upload a spreadsheet or PDF and the assistant will turn it into requests, sorted into the right sub-projects.` })}</div>
   <div class="section-head">
     <h2 class="section">Inventory &amp; attic stock</h2>
     <button class="btn small" data-act="inv-in-area" data-sub="${esc(name)}">Open in Inventory</button>

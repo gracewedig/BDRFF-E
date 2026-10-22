@@ -52,7 +52,7 @@ create table if not exists public.requests (
     check (status in ('Pending', 'Approved', 'In Progress', 'Completed', 'Rejected', 'Cancelled')),
   requested_by uuid default auth.uid() references public.profiles (id) on delete set null,
   requester_name text,
-  source text not null default 'app' check (source in ('app', 'email', 'import')),
+  source text not null default 'app' check (source in ('app', 'email', 'import', 'document')),
   source_ref uuid,
   reviewed_by uuid references public.profiles (id) on delete set null,
   reviewer_name text,
@@ -276,6 +276,30 @@ end $$;
 revoke all on function public.link_email_duplicate from public, anon;
 grant execute on function public.link_email_duplicate to authenticated;
 
+-- Requests can also come from uploaded documents (PDFs and spreadsheets).
+alter table public.requests drop constraint if exists requests_source_check;
+alter table public.requests add constraint requests_source_check check (source in ('app', 'email', 'import', 'document'));
+
+-- -------------------------------------------- uploaded files (PDFs, spreadsheets)
+-- Kept with the project (and the sub-project they were uploaded to) so anyone can
+-- open them later; sub_projects lists every sub-project their requests went to.
+create table if not exists public.documents (
+  id uuid primary key default gen_random_uuid(),
+  project text not null,
+  sub_project text,
+  sub_projects text[] not null default '{}',
+  name text not null,
+  kind text not null default 'other' check (kind in ('pdf', 'spreadsheet', 'other')),
+  path text,
+  size_bytes bigint,
+  summary text,
+  requests_created int not null default 0,
+  uploaded_by uuid default auth.uid() references public.profiles (id) on delete set null,
+  uploaded_by_name text,
+  created_at timestamptz not null default now()
+);
+create index if not exists documents_project on public.documents (project, created_at desc);
+
 -- ------------------------------------------------------------ action items
 create table if not exists public.action_items (
   id uuid primary key default gen_random_uuid(),
@@ -312,6 +336,18 @@ alter table public.inventory_items enable row level security;
 alter table public.inventory_moves enable row level security;
 alter table public.email_requests enable row level security;
 alter table public.app_settings enable row level security;
+alter table public.documents enable row level security;
+
+drop policy if exists "everyone sees documents" on public.documents;
+create policy "everyone sees documents" on public.documents for select to authenticated using (true);
+drop policy if exists "staff upload documents" on public.documents;
+create policy "staff upload documents" on public.documents for insert to authenticated with check (uploaded_by = auth.uid());
+drop policy if exists "uploader or manager edits documents" on public.documents;
+create policy "uploader or manager edits documents" on public.documents for update to authenticated
+  using (uploaded_by = auth.uid() or public.is_manager()) with check (uploaded_by = auth.uid() or public.is_manager());
+drop policy if exists "uploader or manager deletes documents" on public.documents;
+create policy "uploader or manager deletes documents" on public.documents for delete to authenticated
+  using (uploaded_by = auth.uid() or public.is_manager());
 
 drop policy if exists "everyone reads settings" on public.app_settings;
 create policy "everyone reads settings" on public.app_settings for select to authenticated using (true);
@@ -385,6 +421,20 @@ create policy "own saved views" on public.saved_views for all to authenticated
 
 -- ------------------------------------------------------------------ photos
 insert into storage.buckets (id, name, public)
+values ('ffe-docs', 'ffe-docs', false)
+on conflict (id) do nothing;
+
+drop policy if exists "staff view documents" on storage.objects;
+create policy "staff view documents" on storage.objects for select to authenticated
+  using (bucket_id = 'ffe-docs');
+drop policy if exists "staff upload own documents" on storage.objects;
+create policy "staff upload own documents" on storage.objects for insert to authenticated
+  with check (bucket_id = 'ffe-docs' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists "uploader or manager deletes documents" on storage.objects;
+create policy "uploader or manager deletes documents" on storage.objects for delete to authenticated
+  using (bucket_id = 'ffe-docs' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_manager()));
+
+insert into storage.buckets (id, name, public)
 values ('ffe-photos', 'ffe-photos', false)
 on conflict (id) do nothing;
 
@@ -407,7 +457,7 @@ end $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests', 'app_settings'] loop
+  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests', 'app_settings', 'documents'] loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
     exception when duplicate_object then null;

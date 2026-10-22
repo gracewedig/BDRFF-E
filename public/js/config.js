@@ -9,11 +9,13 @@ export const CONFIG = {
   SUPABASE_ANON_KEY: "sb_publishable_Yp-S4Hx-DZi5sNyufiSXNA_i9XgeU1R",
   // Storage bucket created by supabase/schema.sql
   PHOTO_BUCKET: "ffe-photos",
+  DOCS_BUCKET: "ffe-docs",
   // Netlify functions (see netlify/functions)
   AI_ENDPOINT: "/.netlify/functions/ai-sheet",
   EMAIL_ENDPOINT: "/.netlify/functions/email-inbound",
   USERS_ENDPOINT: "/.netlify/functions/manage-users",
   REPORT_ENDPOINT: "/.netlify/functions/email-report",
+  DOC_ENDPOINT: "/.netlify/functions/doc-assistant",
   // Outlook connection (My Outlook Report). Register the app in Microsoft Entra ID
   // and paste its Application (client) ID and Directory (tenant) ID; see README.
   MS_CLIENT_ID: "",

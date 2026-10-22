@@ -19,6 +19,8 @@ import { notesBlock, followUpBanner, followUpsDue } from "./notes.js";
 import * as settings from "./settings.js";
 import * as outlook from "./outlook.js";
 import * as help from "./help.js";
+import * as files from "./files.js";
+import * as review from "./review.js";
 
 // `global` pages work before a project is chosen; the rest need one.
 const NAV = [
@@ -29,6 +31,7 @@ const NAV = [
   { id: "email", label: "Email Requests", badge: "email" },
   { id: "new", label: "New Request" },
   { id: "approvals", label: "Approvals", manager: true, badge: "pending" },
+  { id: "files", label: "Files & Assistant" },
   { id: "inventory", label: "Inventory & Attic Stock" },
   { id: "import", label: "Import Spreadsheet", manager: true },
   { id: "actions", label: "My Action Items", global: true },
@@ -38,14 +41,14 @@ const NAV = [
   { id: "settings", label: "Settings", manager: true, global: true },
   { id: "help", label: "How to Use", global: true },
 ];
-const NAV_ICON = { project: "dashboard", projects: "inventory", outlook: "outlook", settings: "settings", help: "help" };
+const NAV_ICON = { project: "dashboard", projects: "inventory", outlook: "outlook", settings: "settings", help: "help", files: "note" };
 const TITLES = {
   projects: "Projects", dashboard: "Dashboard", requests: "All Requests", email: "Email Requests", new: "New FF&E Request",
   approvals: "Approval Queue", inventory: "Inventory & Attic Stock", import: "Import Spreadsheet", actions: "My Action Items",
-  builder: "Custom Sheet Builder", outlook: "My Outlook FF&E Report", team: "Team & Roles", settings: "Settings", help: "How to Use",
+  builder: "Custom Sheet Builder", files: "Files & Assistant", outlook: "My Outlook FF&E Report", team: "Team & Roles", settings: "Settings", help: "How to Use",
 };
 const title = (route) => (route === "project" ? CURRENT.project : route === "area" ? S.areaName : TITLES[route]);
-const MODULES = [inventory, intake, email, team, projects, notes, settings, outlook, help];
+const MODULES = [inventory, intake, email, team, projects, notes, settings, outlook, help, files, review];
 
 function routeFromHash() {
   const r = decodeURIComponent(location.hash.replace(/^#\/?/, "")) || "projects";
@@ -93,12 +96,14 @@ async function startApp(fresh = false) {
 async function loadAll() {
   await guard(async () => {
     const scoped = !!S.project;
-    const [requests, actions, views, profiles, inv, moves, emails, summary] = await Promise.all([
+    const [requests, actions, views, profiles, inv, moves, emails, summary, docs] = await Promise.all([
       scoped ? store.listRequests() : [], store.listActions(), store.listViews(), isManager() ? store.listProfiles() : [],
       scoped ? store.listInventory() : [], scoped ? store.listMoves() : [], scoped ? store.listEmailRequests() : [],
       store.projectSummary(),
+      // Files arrived in a later database update; don't let a missing table block everything else.
+      scoped ? store.listDocuments().catch((e) => { console.warn("Files unavailable:", e.message); return []; }) : [],
     ]);
-    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails, summary });
+    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails, summary, docs });
   });
 }
 
@@ -115,6 +120,7 @@ async function onRemoteChange(kind) {
   else if (!S.project) S.summary = (await guard(() => store.projectSummary())) || S.summary;
   else if (kind === "inventory") await guard(inventory.reloadInventory);
   else if (kind === "email") S.emails = (await guard(() => store.listEmailRequests())) || S.emails;
+  else if (kind === "documents") S.docs = (await guard(() => store.listDocuments())) || S.docs;
   else S.requests = (await guard(() => store.listRequests())) || S.requests;
   // Don't wipe a half-filled form or a field someone is typing in; just refresh the badges.
   const typing = document.activeElement?.matches?.("#app input, #app textarea, #app select");
@@ -249,6 +255,7 @@ function render() {
       <section class="content">${PAGES[S.route]()}</section>
     </main>
   </div>`;
+  for (const m of MODULES) m.afterRender?.();
 }
 
 function updateBadges() {
@@ -512,7 +519,11 @@ function pageApprovals() {
           <button class="btn small" data-act="quick-status" data-id="${esc(row._raw.id)}" data-status="Completed">Mark completed</button>`}
       </div>
     </div>`;
+  if (review.RV.mode === "swipe") {
+    return `${review.toggleHTML()}${review.swipeHTML()}`;
+  }
   return `
+    ${review.toggleHTML()}
     ${email.emailsToReview() ? `<a class="card callout-link" href="#/email">${icon("email")} <span><b>${email.emailsToReview()} emailed request${email.emailsToReview() === 1 ? "" : "s"}</b> waiting to be turned into tickets. Duplicates were already filed away.</span> <span class="btn small">Review</span></a>` : ""}
     <h2 class="section">Waiting for approval <span class="muted">(${pending.length})</span></h2>
     ${pending.length ? pending.map(card).join("") : `<div class="empty card">All caught up — nothing waiting for approval.</div>`}

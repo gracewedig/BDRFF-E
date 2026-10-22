@@ -180,6 +180,44 @@ function createCloudStore() {
       check(await sb.rpc("set_follow_up", { p_table: table, p_id: id, p_on: on || null, p_note: note || null }));
     },
 
+    async listDocuments() {
+      let q = sb.from("documents").select("*").order("created_at", { ascending: false });
+      if (SCOPE) q = q.eq("project", SCOPE);
+      return check(await q);
+    },
+    async uploadDocument(file) {
+      const ext = (file.name.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
+      const path = `${me.id}/${crypto.randomUUID()}.${ext}`;
+      check(await sb.storage.from(CONFIG.DOCS_BUCKET).upload(path, file, { contentType: file.type || undefined }));
+      return path;
+    },
+    async saveDocument(doc) {
+      const { id, created_at, ...fields } = doc;
+      return id
+        ? check(await sb.from("documents").update(fields).eq("id", id).select().single())
+        : check(await sb.from("documents").insert({ project: SCOPE, uploaded_by: me.id, uploaded_by_name: me.full_name || me.email, ...fields }).select().single());
+    },
+    async documentUrl(doc) {
+      if (!doc.path) return "";
+      return check(await sb.storage.from(CONFIG.DOCS_BUCKET).createSignedUrl(doc.path, 60 * 60)).signedUrl;
+    },
+    async deleteDocument(doc) {
+      if (doc.path) await sb.storage.from(CONFIG.DOCS_BUCKET).remove([doc.path]);
+      check(await sb.from("documents").delete().eq("id", doc.id));
+    },
+    // Document assistant (Netlify function). Errors carry .status so callers can retry smaller pieces.
+    async askAssistant(payload) {
+      const { data } = await sb.auth.getSession();
+      const res = await fetch(CONFIG.DOC_ENDPOINT, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${data.session?.access_token || ""}` },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw Object.assign(new Error(body.error || `Assistant unavailable (${res.status})`), { status: res.status });
+      return body;
+    },
+
     async listInventory() {
       let q = sb.from("inventory_items").select("*").order("sub_project").order("category").order("item_name");
       if (SCOPE) q = q.eq("project", SCOPE);
@@ -244,6 +282,7 @@ function createCloudStore() {
         .on("postgres_changes", { event: "INSERT", schema: "public", table: "inventory_moves" }, () => onChange("inventory"))
         .on("postgres_changes", { event: "*", schema: "public", table: "email_requests" }, () => onChange("email"))
         .on("postgres_changes", { event: "*", schema: "public", table: "app_settings" }, () => onChange("settings"))
+        .on("postgres_changes", { event: "*", schema: "public", table: "documents" }, () => onChange("documents"))
         .subscribe();
       return () => sb.removeChannel(ch);
     },
@@ -337,6 +376,7 @@ function createDemoStore() {
   }
 
   let memory = null; // used when the browser blocks storage
+  const pendingFiles = {}; // uploaded file contents waiting for saveDocument
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
@@ -482,6 +522,40 @@ function createDemoStore() {
       Object.assign(it, { follow_up_on: on || null, follow_up_note: note || null, follow_up_by_name: on ? me().full_name : null });
       save(db);
     },
+
+    async listDocuments() {
+      return (load().documents || []).filter(inScope).sort((a, b) => b.created_at.localeCompare(a.created_at));
+    },
+    // Demo keeps small files (under 1.5 MB) in the browser so they can be opened again.
+    async uploadDocument(file) {
+      const path = uid();
+      if (file.size <= 1.5e6) {
+        pendingFiles[path] = await new Promise((resolve) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = () => resolve(null);
+          r.readAsDataURL(file);
+        });
+      }
+      return path;
+    },
+    async saveDocument(doc) {
+      const db = load();
+      db.documents = db.documents || [];
+      let d = doc.id && db.documents.find((x) => x.id === doc.id);
+      if (d) Object.assign(d, doc);
+      else {
+        const u = me();
+        d = { project: SCOPE, sub_projects: [], requests_created: 0, ...doc, id: uid(), uploaded_by: u.id, uploaded_by_name: u.full_name, created_at: new Date().toISOString(), data: pendingFiles[doc.path] || null };
+        delete pendingFiles[doc.path];
+        db.documents.push(d);
+      }
+      save(db);
+      return { ...d };
+    },
+    async documentUrl(doc) { return doc.data || ""; },
+    async deleteDocument(doc) { const db = load(); db.documents = (db.documents || []).filter((d) => d.id !== doc.id); save(db); },
+    async askAssistant() { throw Object.assign(new Error("The AI assistant isn't available in Demo mode"), { status: 503 }); },
 
     async listInventory() { return load().inventory.filter(inScope); },
     async listMoves() {

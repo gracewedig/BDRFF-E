@@ -54,7 +54,7 @@ export const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 export const ACTION_STATUSES = ["Not Started", "In Progress", "Waiting", "Done"];
 export const PHOTO_KINDS = { concept: "Concept image", damage: "Proof of damage" };
 export const STOCK_TYPES = ["Attic Stock", "Inventory"];
-export const SOURCES = { app: "App", email: "Email", import: "Spreadsheet" };
+export const SOURCES = { app: "App", email: "Email", import: "Spreadsheet", document: "Document" };
 
 // How a name tends to be written in emails and spreadsheets: "The Cove" also
 // matches "cove", "Waterpark" also matches "water park".

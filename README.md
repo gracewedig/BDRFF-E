@@ -15,7 +15,8 @@ A web app for FF&E (furniture, fixtures & equipment) requests, approvals, invent
 | **Follow-ups** | Set a follow-up date and note on any ticket, including rejected or cancelled ones, or on a dismissed email; it can go straight onto your action items. Filters for “Rejected & cancelled” and “Has a follow-up”, plus a dashboard tile for follow-ups due this week. |
 | **Email Requests** (separate tab) | Emails sent to an FF&E inbox become draft tickets automatically (photos included). Anything already submitted, or already emailed, is filed under **Auto-matched duplicates**, so managers review each request once. **Dismissed** emails stay visible with who dismissed them and why, so anyone can follow up, and managers can bring them back or create a ticket anyway. |
 | **My Outlook Report** | **Anyone** can connect their own Outlook. The app reads their recent inbox (in their browser) and reports which FF&E requests are coming up: what's needed when, what's urgent, and whether each one is already a ticket. New ones can be sent to Email Requests with one click; the report can be copied or exported. |
-| **Approvals** (managers) | Approve, or reject with a note, then *In Progress* → *Completed*. Rejected or cancelled tickets can be reopened. |
+| **Files & Assistant** | Upload spreadsheets and PDFs (punch lists, inspection reports, spec books) from any sub-project page or the Files page. Files are kept with the project so anyone can open them later. The assistant reads them and proposes requests, **each routed to the sub-project it belongs to**, skips anything already requested, and lets you **chat** about how to organize it before you confirm. Long files are read in sections; scanned PDFs up to 4 MB are supported. |
+| **Approvals** (managers) | **Swipe review**: one card at a time, ✓ / drag right to approve, ✗ / drag left to reject, *Later* to skip, *Undo*. Or switch to the list view. Then *In Progress* → *Completed*; rejected or cancelled tickets can be reopened. |
 | **Inventory & Attic Stock** | Per-sub-project views (attic stock vs. inventory, low-stock warnings against par levels). **Take out** stock and optionally record where it went; return/add stock; full movement log; Excel export with one tab per sub-project. |
 | **Import Spreadsheet** (managers) | Excel/CSV for inventory or requests, sorted into sub-projects by column, tab name or row text, with a full preview first. |
 | **My Action Items & Sheet Builder** | A private checklist, personal/combined Excel exports, and plain-English custom sheets you can pin to your dashboard. |
@@ -72,6 +73,8 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 <p>Your verification code: <strong>{{ .Token }}</strong></p>
 ```
 For reliable delivery to your team, set up your own sender under **Authentication → Emails → SMTP Settings** (e.g. your Microsoft 365 mailbox or Resend); Supabase's built-in sender is only for testing.
+
+**Updating the database:** when a new version adds features (like Files), re-run all of `supabase/schema.sql` in the SQL Editor. It's safe to run again and keeps your data.
 
 ### 4. Hook up the shared FF&E inbox
 Email intake address (shown to managers on the Email Requests tab):

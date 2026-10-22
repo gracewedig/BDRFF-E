@@ -4,7 +4,7 @@ import { defaultSpec } from "./views.js";
 export const S = {
   me: null,
   requests: [], actions: [], views: [], profiles: [],
-  inventory: [], moves: [], emails: [],
+  inventory: [], moves: [], emails: [], docs: [],
   route: "dashboard",
   reqFilter: { q: "", sub: "", status: "" },
   actionFilter: "",
