@@ -2,11 +2,11 @@ import { store } from "./store.js";
 import { CONFIG } from "./config.js";
 import {
   PROJECTS, AREAS, CURRENT, applySettings, setCurrentProject, STATUSES, OPEN_STATUSES, CLOSED_STATUSES, PRIORITIES, ACTION_STATUSES, PHOTO_KINDS, FIELDS, FIELD_MAP,
-  OPS, VALUELESS_OPS, toRow, todayISO, ticketLabel, isOverdue,
+  OPS, VALUELESS_OPS, FULFILLMENT, PRICE_DISCLAIMER, money, toRow, todayISO, ticketLabel, isOverdue,
 } from "./fields.js";
 import { applyView, defaultSpec, sanitizeSpec, localSpecFromPrompt } from "./views.js";
 import { downloadWorkbook, downloadCsv, requestsTab, viewTab, actionsTab } from "./export.js";
-import { findMatches, DUP_THRESHOLD } from "./dedupe.js";
+import { findMatches, rejectedMatch, DUP_THRESHOLD } from "./dedupe.js";
 import { S, isManager, ROLE_LABEL, hooks } from "./state.js";
 import { app, modalRoot, esc, slug, fmtDate, opt, badge, toast, guard, icon, tableHTML, initials } from "./ui.js";
 import * as inventory from "./inventory.js";
@@ -21,6 +21,7 @@ import * as outlook from "./outlook.js";
 import * as help from "./help.js";
 import * as files from "./files.js";
 import * as review from "./review.js";
+import * as spec from "./spec.js";
 
 // `global` pages work before a project is chosen; the rest need one.
 const NAV = [
@@ -30,6 +31,7 @@ const NAV = [
   { id: "requests", label: "All Requests" },
   { id: "email", label: "Email Requests", badge: "email" },
   { id: "new", label: "New Request" },
+  { id: "spec", label: "Spec Sheet" },
   { id: "approvals", label: "Approvals", manager: true, badge: "pending" },
   { id: "files", label: "Files & Assistant" },
   { id: "inventory", label: "Inventory & Attic Stock" },
@@ -41,14 +43,14 @@ const NAV = [
   { id: "settings", label: "Settings", manager: true, global: true },
   { id: "help", label: "How to Use", global: true },
 ];
-const NAV_ICON = { project: "dashboard", projects: "inventory", outlook: "outlook", settings: "settings", help: "help", files: "note" };
+const NAV_ICON = { project: "dashboard", projects: "inventory", outlook: "outlook", settings: "settings", help: "help", files: "note", spec: "builder" };
 const TITLES = {
   projects: "Projects", dashboard: "Dashboard", requests: "All Requests", email: "Email Requests", new: "New FF&E Request",
   approvals: "Approval Queue", inventory: "Inventory & Attic Stock", import: "Import Spreadsheet", actions: "My Action Items",
-  builder: "Custom Sheet Builder", files: "Files & Assistant", outlook: "My Outlook FF&E Report", team: "Team & Roles", settings: "Settings", help: "How to Use",
+  builder: "Custom Sheet Builder", spec: "FF&E Spec Sheet", files: "Files & Assistant", outlook: "My Outlook FF&E Report", team: "Team & Roles", settings: "Settings", help: "How to Use",
 };
 const title = (route) => (route === "project" ? CURRENT.project : route === "area" ? S.areaName : TITLES[route]);
-const MODULES = [inventory, intake, email, team, projects, notes, settings, outlook, help, files, review];
+const MODULES = [inventory, intake, email, team, projects, notes, settings, outlook, help, files, review, spec];
 
 function routeFromHash() {
   const r = decodeURIComponent(location.hash.replace(/^#\/?/, "")) || "projects";
@@ -96,14 +98,15 @@ async function startApp(fresh = false) {
 async function loadAll() {
   await guard(async () => {
     const scoped = !!S.project;
-    const [requests, actions, views, profiles, inv, moves, emails, summary, docs] = await Promise.all([
+    const [requests, actions, views, profiles, inv, moves, emails, summary, docs, specs] = await Promise.all([
       scoped ? store.listRequests() : [], store.listActions(), store.listViews(), isManager() ? store.listProfiles() : [],
       scoped ? store.listInventory() : [], scoped ? store.listMoves() : [], scoped ? store.listEmailRequests() : [],
       store.projectSummary(),
       // Files arrived in a later database update; don't let a missing table block everything else.
       scoped ? store.listDocuments().catch((e) => { console.warn("Files unavailable:", e.message); return []; }) : [],
+      scoped ? store.listSpecItems().catch((e) => { console.warn("Spec sheet unavailable:", e.message); return []; }) : [],
     ]);
-    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails, summary, docs });
+    Object.assign(S, { requests, actions, views, profiles, inventory: inv, moves, emails, summary, docs, specs, allRequests: null });
   });
 }
 
@@ -121,7 +124,11 @@ async function onRemoteChange(kind) {
   else if (kind === "inventory") await guard(inventory.reloadInventory);
   else if (kind === "email") S.emails = (await guard(() => store.listEmailRequests())) || S.emails;
   else if (kind === "documents") S.docs = (await guard(() => store.listDocuments())) || S.docs;
-  else S.requests = (await guard(() => store.listRequests())) || S.requests;
+  else if (kind === "specs") S.specs = (await guard(() => store.listSpecItems())) || S.specs;
+  else {
+    S.requests = (await guard(() => store.listRequests())) || S.requests;
+    if (S.allRequests) S.allRequests = (await guard(() => store.listAllRequests())) || S.allRequests;
+  }
   // Don't wipe a half-filled form or a field someone is typing in; just refresh the badges.
   const typing = document.activeElement?.matches?.("#app input, #app textarea, #app select");
   if (S.route === "new" || typing) updateBadges();
@@ -223,7 +230,7 @@ function renderSetPassword(msg = "") {
 }
 
 /* ----------------------------------------------------------------- shell */
-function pendingCount() { return S.requests.filter((r) => r.status === "Pending").length; }
+function pendingCount() { return S.requests.filter((r) => ["Pending", "Duplicate"].includes(r.status)).length; }
 function badgeCount(kind) {
   if (kind === "email") return email.emailsToReview();
   if (kind === "pending") return pendingCount() + email.emailsToReview();
@@ -270,7 +277,7 @@ function pageDashboard() {
   const open = rows.filter((r) => OPEN_STATUSES.includes(r.status));
   const overdue = rows.filter((r) => isOverdue(r, today));
   const month = today.slice(0, 7);
-  const doneMonth = rows.filter((r) => r.status === "Completed" && (r._raw.updated_at || r._raw.reviewed_at || "").slice(0, 7) === month);
+  const doneMonth = rows.filter((r) => r.status === "Fulfilled" && (r._raw.fulfilled_at || r._raw.updated_at || "").slice(0, 7) === month);
   const pinned = S.views.filter((v) => v.pinned);
   const myOpenActions = S.actions.filter((a) => a.status !== "Done").length;
   const lowStock = S.inventory.filter(inventory.isLow).length;
@@ -280,7 +287,7 @@ function pageDashboard() {
     <div class="kpi"><span>Open requests</span><strong>${open.length}</strong></div>
     <a class="kpi ${isManager() ? "link" : ""}" ${isManager() ? 'href="#/approvals"' : ""}><span>Awaiting approval</span><strong>${pendingCount()}</strong></a>
     <div class="kpi ${overdue.length ? "warn" : ""}"><span>Overdue</span><strong>${overdue.length}</strong></div>
-    <div class="kpi"><span>Completed this month</span><strong>${doneMonth.length}</strong></div>
+    <div class="kpi"><span>Fulfilled this month</span><strong>${doneMonth.length}</strong></div>
     <a class="kpi link ${email.emailsToReview() ? "warn-soft" : ""}" href="#/email"><span>Emailed requests to review</span><strong>${email.emailsToReview()}</strong></a>
     <a class="kpi link ${lowStock ? "warn" : ""}" href="#/inventory"><span>Low-stock items</span><strong>${lowStock}</strong></a>
     <a class="kpi link" href="#/actions"><span>My open action items</span><strong>${myOpenActions}</strong></a>
@@ -321,28 +328,43 @@ function pageDashboard() {
 function filteredRequests() {
   const { q, sub, status } = S.reqFilter;
   const needle = q.trim().toLowerCase();
-  return S.requests.map((r) => toRow(r)).filter((row) =>
-    (!sub || row.sub_project === sub) &&
+  const all = S.reqScope === "all";
+  return (all ? S.allRequests || [] : S.requests).map((r) => toRow(r)).filter((row) =>
+    (all || !sub || row.sub_project === sub) &&
     (!status || (status === "open" ? OPEN_STATUSES.includes(row.status) : status === "overdue" ? isOverdue(row)
       : status === "closed-out" ? ["Rejected", "Cancelled"].includes(row.status)
       : status === "follow-up" ? !!row.follow_up_on : row.status === status)) &&
     (!needle || ["ticket", "buildings", "rooms", "item_needed", "ffe_tag", "spec", "requester_name", "details"].some((k) => String(row[k]).toLowerCase().includes(needle))));
 }
 
-const REQUEST_COLS = ["ticket", "sub_project", "buildings", "rooms", "item_needed", "ffe_tag", "needed_by", "priority", "status", "requester_name", "notes"];
+const REQUEST_COLS = ["ticket", "sub_project", "buildings", "rooms", "item_needed", "ffe_tag", "fulfillment", "needed_by", "priority", "status", "requester_name", "notes"];
 
 function requestsTableHTML() {
-  const rows = filteredRequests().sort((a, b) => (b._raw.created_at || "").localeCompare(a._raw.created_at || ""));
-  return `<p class="muted small">${rows.length} request${rows.length === 1 ? "" : "s"}</p>` +
-    tableHTML(REQUEST_COLS.map((k) => FIELD_MAP[k]), rows, { empty: "No requests match these filters." });
+  const all = S.reqScope === "all";
+  if (all && !S.allRequests) return '<p class="muted small more">Loading every project…</p>';
+  const rows = filteredRequests().sort((a, b) => (all ? a.project.localeCompare(b.project) : 0) || (b._raw.created_at || "").localeCompare(a._raw.created_at || ""));
+  const cols = all ? ["project", ...REQUEST_COLS] : REQUEST_COLS;
+  return `<p class="muted small">${rows.length} request${rows.length === 1 ? "" : "s"}${all ? " across all projects" : ""}</p>` +
+    tableHTML(cols.map((k) => FIELD_MAP[k]), rows, { empty: "No requests match these filters.", groupBy: all ? "project" : "none" });
+}
+
+async function loadAllRequests() {
+  const list = await guard(() => store.listAllRequests());
+  S.allRequests = list || [];
+  const box = document.getElementById("req-table");
+  if (box) box.innerHTML = requestsTableHTML();
 }
 
 function pageRequests() {
   const f = S.reqFilter;
   return `
+  <div class="seg-row" role="tablist" aria-label="Which requests">
+    <button class="seg ${S.reqScope !== "all" ? "on" : ""}" data-act="req-scope" data-scope="project">${esc(CURRENT.project)}</button>
+    <button class="seg ${S.reqScope === "all" ? "on" : ""}" data-act="req-scope" data-scope="all">All projects</button>
+  </div>
   <div class="toolbar">
     <input type="search" placeholder="Search ticket, building, room, item, tag…" value="${esc(f.q)}" data-input="req-search" class="grow">
-    ${AREAS.length ? `<select data-change="req-filter" data-key="sub">${opt("", "All sub-projects")}${AREAS.map((p) => opt(p, p, f.sub === p)).join("")}</select>` : ""}
+    ${AREAS.length && S.reqScope !== "all" ? `<select data-change="req-filter" data-key="sub">${opt("", "All sub-projects")}${AREAS.map((p) => opt(p, p, f.sub === p)).join("")}</select>` : ""}
     <select data-change="req-filter" data-key="status">${opt("", "All statuses")}${opt("open", "Open (not closed)", f.status === "open")}${opt("overdue", "Overdue", f.status === "overdue")}${opt("closed-out", "Rejected & cancelled (follow up)", f.status === "closed-out")}${opt("follow-up", "Has a follow-up", f.status === "follow-up")}${STATUSES.map((s) => opt(s, s, f.status === s)).join("")}</select>
     <button class="btn" data-act="export-requests">${icon("download")} Export</button>
     <a class="btn primary" href="#/new">${icon("new")} New request</a>
@@ -353,15 +375,23 @@ function pageRequests() {
 /* ----------------------------------------------------------- new request */
 function pageNew() {
   const d = S.draft;
+  const item = spec.specById(d.specId);
   return `
   <form class="request-form" data-form="request" novalidate>
-    <p class="lead">Be as specific as possible — the more detail here, the faster this gets approved and fixed.</p>
+    <p class="lead">Be as specific as possible — the more detail here, the faster this gets approved and filled.</p>
 
     <fieldset class="card">
-      <legend>1. Where</legend>
+      <legend>1. Attic stock or new? <em>*</em></legend>
+      <div class="chip-select stack-sm" role="radiogroup" aria-label="Attic stock or order new">
+        ${Object.entries(FULFILLMENT).map(([k, label]) => `<label class="chip"><input type="radio" name="fulfillment" value="${k}" ${d.fulfillment === k ? "checked" : ""} data-change="req-fulfillment" required><span>${esc(label)}</span></label>`).join("")}
+      </div>
+    </fieldset>
+
+    <fieldset class="card">
+      <legend>2. Where</legend>
       <p class="muted small">Project: <b>${esc(CURRENT.project)}</b>${AREAS.length ? " · choose the sub-project" : ""}</p>
       ${AREAS.length ? `<div class="chip-select" role="radiogroup" aria-label="Sub-project">
-        ${AREAS.map((p) => `<label class="chip"><input type="radio" name="sub_project" value="${esc(p)}" ${d.sub === p ? "checked" : ""} required><span>${esc(p)}</span></label>`).join("")}
+        ${AREAS.map((p) => `<label class="chip"><input type="radio" name="sub_project" value="${esc(p)}" ${d.sub === p ? "checked" : ""} data-change="req-sub" required><span>${esc(p)}</span></label>`).join("")}
       </div>` : ""}
       <div class="row2">
         <label>Building(s) <em>*</em><input name="buildings" required placeholder="e.g. 89, or 89 & 90"></label>
@@ -370,21 +400,24 @@ function pageNew() {
     </fieldset>
 
     <fieldset class="card">
-      <legend>2. What</legend>
-      <label>What do you need? <em>*</em><textarea name="item_needed" required rows="3" placeholder="Describe the item and what's wrong or what's needed"></textarea></label>
+      <legend>3. What</legend>
+      <div id="spec-pick">${spec.specSelectHTML(d.sub, d.specId)}</div>
+      <div id="spec-price">${spec.priceHTML(item, 1)}</div>
+      <label>What do you need? <em>*</em><textarea name="item_needed" required rows="3" placeholder="Describe the item and what's wrong or what's needed">${esc(item?.name || "")}</textarea></label>
       <div class="row2">
-        <label>FF&amp;E tag # <em>*</em><input name="ffe_tag" required placeholder="Tag on the item, e.g. FFE-COV-OD-114"></label>
-        <label>Specification <span class="muted">(manufacturer, model, finish, size)</span><input name="spec" placeholder="e.g. Sunbrella Canvas Navy, 24×24×4"></label>
+        <label>FF&amp;E tag # <em>*</em><input name="ffe_tag" required placeholder="Tag on the item, e.g. FFE-COV-OD-114" value="${esc(item?.ffe_tag || "")}" data-input="req-tag"></label>
+        <label>Specification <span class="muted">(manufacturer, model, finish, size)</span><input name="spec" placeholder="e.g. Sunbrella Canvas Navy, 24×24×4" value="${esc(item?.spec || "")}"></label>
       </div>
-      <div class="row3">
-        <label>Quantity <em>*</em><input name="quantity" type="number" min="1" value="1" required></label>
-        <label>Priority<select name="priority">${PRIORITIES.map((p) => opt(p, p, p === "Normal")).join("")}</select></label>
-        <label>Needed fixed by <em>*</em><input name="needed_by" type="date" required min="${todayISO()}"></label>
+      <div id="attic-hint">${d.fulfillment && d.fulfillment !== "order" ? spec.atticHTML(item?.ffe_tag, d.sub) : ""}</div>
+      <div class="row2">
+        <label>Quantity <em>*</em><input name="quantity" type="number" min="1" value="1" required data-input="req-qty"></label>
+        <label>Desired delivery date <em>*</em><input name="needed_by" type="date" required min="${todayISO()}"></label>
       </div>
+      <p class="muted small">Managers set the priority after approving.</p>
     </fieldset>
 
     <fieldset class="card">
-      <legend>3. Photos <em>*</em></legend>
+      <legend>4. Photos <em>*</em></legend>
       <p class="muted small">Attach at least one photo. For each one, choose whether it's a <b>concept image</b> (what the item should look like) or <b>proof of damage</b>.</p>
       <label class="drop">
         ${icon("camera", "ico lg")}
@@ -395,7 +428,7 @@ function pageNew() {
     </fieldset>
 
     <fieldset class="card">
-      <legend>4. Anything else</legend>
+      <legend>5. Anything else</legend>
       <label>Additional details <span class="muted">(access notes, vendor, guest impact…)</span><textarea name="details" rows="3"></textarea></label>
     </fieldset>
 
@@ -404,6 +437,16 @@ function pageNew() {
       <button class="btn primary lg" type="submit">Submit request</button>
     </div>
   </form>`;
+}
+
+// Live bits of the request form: spec list for the sub-project, price, attic stock on hand.
+function refreshSpecPrice(form) {
+  const box = form.querySelector("#spec-price");
+  if (box) box.innerHTML = spec.priceHTML(spec.specById(S.draft.specId), form.elements.quantity?.value);
+}
+function refreshAtticHint(form) {
+  const box = form.querySelector("#attic-hint");
+  if (box) box.innerHTML = S.draft.fulfillment && S.draft.fulfillment !== "order" ? spec.atticHTML(form.elements.ffe_tag.value, S.draft.sub) : "";
 }
 
 function photoListHTML() {
@@ -457,30 +500,36 @@ async function submitRequest(form) {
   const fields = {
     project: CURRENT.project, sub_project: v("sub_project"), buildings: v("buildings"), rooms: v("rooms"), item_needed: v("item_needed"),
     ffe_tag: v("ffe_tag"), spec: v("spec"), quantity: Math.max(1, parseInt(v("quantity"), 10) || 1),
-    priority: v("priority") || "Normal", needed_by: v("needed_by"), details: v("details"),
+    needed_by: v("needed_by"), details: v("details"), fulfillment: v("fulfillment"),
   };
+  const picked = spec.specById(S.draft.specId);
+  if (picked) Object.assign(fields, { spec_item_id: picked.id, unit_price: picked.unit_price ?? null });
   const missing = [];
+  if (!fields.fulfillment) missing.push("attic stock or order new");
   if (AREAS.length && !fields.sub_project) missing.push("sub-project");
   if (!fields.buildings) missing.push("building(s)");
   if (!fields.rooms) missing.push("room number(s)");
   if (!fields.item_needed) missing.push("what you need");
   if (!fields.ffe_tag) missing.push("FF&E tag");
-  if (!fields.needed_by) missing.push("needed-by date");
+  if (!fields.needed_by) missing.push("desired delivery date");
   if (!S.draft.photos.length) missing.push("at least one photo");
   form.querySelectorAll("[required]").forEach((el) => el.classList.toggle("invalid", !el.value.trim() && el.type !== "radio"));
   if (missing.length) { err.textContent = `Please add: ${missing.join(", ")}.`; return; }
-  if (fields.needed_by < todayISO()) { err.textContent = "The needed-by date can't be in the past."; return; }
+  if (fields.needed_by < todayISO()) { err.textContent = "The desired delivery date can't be in the past."; return; }
   if (S.draft.photos.some((p) => !p.kind)) { err.textContent = "Choose “Concept image” or “Proof of damage” for every photo."; return; }
   err.textContent = "";
 
   // Catch the same request being submitted twice before a manager has to review both.
-  const open = S.requests.filter((r) => !["Rejected", "Cancelled", "Completed"].includes(r.status));
+  const open = S.requests.filter((r) => !["Rejected", "Cancelled", "Fulfilled", "Duplicate"].includes(r.status));
   const [dup] = findMatches(fields, open, 1);
   if (dup && dup.score >= DUP_THRESHOLD && !confirm(
     `This looks like ${ticketLabel(dup.item.ticket_no)} (${dup.item.status}): “${dup.item.item_needed}”, ${dup.reasons.join(", ")}.\n\nSubmit it anyway as a separate request?`)) {
     openRequest(dup.item.id);
     return;
   }
+  // Something managers already rejected goes to Duplicate requests instead of the approval queue.
+  const again = rejectedMatch(fields, S.requests);
+  if (again) Object.assign(fields, { status: "Duplicate", duplicate_of: again.root.id });
 
   const btn = form.querySelector('button[type="submit"]');
   btn.disabled = true;
@@ -490,50 +539,110 @@ async function submitRequest(form) {
   btn.textContent = "Submit request";
   if (!created) return;
   S.requests = [created, ...S.requests.filter((r) => r.id !== created.id)];
-  S.draft = { photos: [], sub: "" };
-  toast(`${ticketLabel(created.ticket_no)} submitted for approval`);
+  S.draft = { photos: [], sub: "", specId: "", fulfillment: "" };
+  toast(again
+    ? `${ticketLabel(created.ticket_no)} submitted. It's like ${ticketLabel(again.root.ticket_no)}, which was rejected, so managers will see them together.`
+    : `${ticketLabel(created.ticket_no)} submitted for approval`);
   location.hash = "#/requests";
   openRequest(created.id);
   email.linkEmailsToNewRequest(created);
 }
 
 /* ------------------------------------------------------------- approvals */
+// Drafts: rejected requests that can still be approved later. A rejected
+// duplicate is folded into the original it repeats, so each need shows once.
+function draftRequests() {
+  const ids = new Set(S.requests.map((r) => r.id));
+  return S.requests.filter((r) => r.status === "Rejected" && !(r.duplicate_of && ids.has(r.duplicate_of)));
+}
+const repeatsOf = (id) => S.requests.filter((r) => r.duplicate_of === id);
+const duplicateRequests = () => S.requests.filter((r) => r.status === "Duplicate");
+
+function priorityPicker(r, label = "Priority") {
+  return `<label class="prio-pick" title="Managers set the priority after approving">${label}
+    <select data-change="set-priority" data-id="${esc(r.id)}">${PRIORITIES.map((p) => opt(p, p, (r.priority || "Normal") === p)).join("")}</select></label>`;
+}
+
 function pageApprovals() {
   const today = todayISO();
-  const pending = S.requests.filter((r) => r.status === "Pending").map((r) => toRow(r, today)).sort((a, b) => a.needed_by.localeCompare(b.needed_by));
-  const active = S.requests.filter((r) => ["Approved", "In Progress"].includes(r.status)).map((r) => toRow(r, today)).sort((a, b) => a.needed_by.localeCompare(b.needed_by));
+  const byNeeded = (a, b) => a.needed_by.localeCompare(b.needed_by);
+  const pending = S.requests.filter((r) => r.status === "Pending").map((r) => toRow(r, today)).sort(byNeeded);
+  const active = S.requests.filter((r) => ["Approved", "In Progress"].includes(r.status)).map((r) => toRow(r, today)).sort(byNeeded);
+  const dups = duplicateRequests();
+  const drafts = draftRequests().sort((a, b) => (b.reviewed_at || "").localeCompare(a.reviewed_at || ""));
+  const tab = S.approvalTab;
+  const tabs = `<div class="seg-row" role="tablist" aria-label="Approvals">
+    ${[["pending", "To approve", pending.length], ["active", "Approved & in progress", active.length], ["duplicates", "Duplicate requests", dups.length], ["drafts", "Drafts (rejected)", drafts.length]]
+      .map(([k, label, n]) => `<button class="seg ${tab === k ? "on" : ""}" data-act="ap-tab" data-tab="${k}">${label} <span>${n}</span></button>`).join("")}
+  </div>`;
+  const summary = (row) => `
+        <div class="ap-top"><strong class="mono">${esc(row.ticket)}</strong> ${badge(row.sub_project || row.project, "proj")} ${row.fulfillment ? badge(row.fulfillment, "inv") : ""} ${row.priority !== "Normal" && !["Pending", "Duplicate"].includes(row.status) ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div>
+        <h3>${esc(row.item_needed)}</h3>
+        <p class="muted small">Bldg ${esc(row.buildings)} · Room ${esc(row.rooms)} · Tag ${esc(row.ffe_tag)} · Qty ${esc(row.quantity)}${row.est_cost !== "" ? ` · Est. ${esc(money(row.est_cost))}` : ""}</p>
+        <p class="small">Delivery by <span class="${isOverdue(row, today) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}</span> · from ${esc(row.requester_name)} · ${row.concept_photos + row.damage_photos} photo(s)</p>`;
   const card = (row) => `
     <div class="approval">
-      <div class="ap-main" data-act="open-request" data-id="${esc(row._raw.id)}">
-        <div class="ap-top"><strong class="mono">${esc(row.ticket)}</strong> ${badge(row.sub_project || row.project, "proj")} ${row.priority !== "Normal" ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div>
-        <h3>${esc(row.item_needed)}</h3>
-        <p class="muted small">Bldg ${esc(row.buildings)} · Room ${esc(row.rooms)} · Tag ${esc(row.ffe_tag)} · Qty ${esc(row.quantity)}</p>
-        <p class="small">Needed by <span class="${isOverdue(row, today) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}</span> · from ${esc(row.requester_name)} · ${row.concept_photos + row.damage_photos} photo(s)</p>
-      </div>
+      <div class="ap-main" data-act="open-request" data-id="${esc(row._raw.id)}">${summary(row)}</div>
       <div class="ap-actions">
         ${row.status === "Pending" ? `
           <button class="btn approve" data-act="quick-review" data-id="${esc(row._raw.id)}" data-status="Approved">Approve</button>
           <button class="btn reject" data-act="open-request" data-id="${esc(row._raw.id)}">Reject…</button>` : `
           ${badge(row.status)}
+          ${priorityPicker(row._raw)}
           ${row.status === "Approved" ? `<button class="btn small" data-act="quick-status" data-id="${esc(row._raw.id)}" data-status="In Progress">Start work</button>` : ""}
-          <button class="btn small" data-act="quick-status" data-id="${esc(row._raw.id)}" data-status="Completed">Mark completed</button>`}
+          <button class="btn small" data-act="quick-status" data-id="${esc(row._raw.id)}" data-status="Fulfilled">Mark fulfilled</button>`}
       </div>
     </div>`;
-  if (review.RV.mode === "swipe") {
-    return `${review.toggleHTML()}${review.swipeHTML()}`;
+  const original = (r) => S.requests.find((x) => x.id === r.duplicate_of);
+  const dupCard = (r) => {
+    const row = toRow(r, today);
+    const o = original(r);
+    return `
+    <div class="approval dup">
+      <div class="ap-main" data-act="open-request" data-id="${esc(r.id)}">${summary(row)}
+        ${o ? `<div class="dup-of" data-act="open-request" data-id="${esc(o.id)}">Same as <b class="mono">${esc(ticketLabel(o.ticket_no))}</b> ${badge(o.status)} “${esc(o.item_needed)}”
+          ${o.status === "Rejected" ? `<span class="muted small">rejected by ${esc(o.reviewer_name || "a manager")} ${esc(fmtDate(o.reviewed_at))}${o.review_note ? `: ${esc(o.review_note)}` : ""}</span>` : ""}</div>` : ""}
+      </div>
+      <div class="ap-actions">
+        <button class="btn approve" data-act="quick-review" data-id="${esc(r.id)}" data-status="Approved">Approve</button>
+        <button class="btn reject" data-act="dup-reject" data-id="${esc(r.id)}" title="Files it with the original in Drafts">Reject</button>
+      </div>
+    </div>`;
+  };
+  const draftCard = (r) => {
+    const row = toRow(r, today);
+    const again = repeatsOf(r.id);
+    return `
+    <div class="approval draft">
+      <div class="ap-main" data-act="open-request" data-id="${esc(r.id)}">${summary(row)}
+        <p class="small muted">Rejected by ${esc(r.reviewer_name || "a manager")} ${esc(fmtDate(r.reviewed_at))}${r.review_note ? `: “${esc(r.review_note)}”` : ""}</p>
+        ${again.length ? `<p class="small"><b>Requested again ${again.length}×</b> ${again.map((x) => `<span class="mono">${esc(ticketLabel(x.ticket_no))}</span>`).join(", ")}</p>` : ""}
+      </div>
+      <div class="ap-actions"><button class="btn approve" data-act="quick-review" data-id="${esc(r.id)}" data-status="Approved">Approve now</button></div>
+    </div>`;
+  };
+  const emailNote = email.emailsToReview() ? `<a class="card callout-link" href="#/email">${icon("email")} <span><b>${email.emailsToReview()} emailed request${email.emailsToReview() === 1 ? "" : "s"}</b> waiting to be turned into tickets. Duplicates were already filed away.</span> <span class="btn small">Review</span></a>` : "";
+
+  if (tab === "active") {
+    return `${tabs}<p class="muted small">Set each one's priority, then move it to In Progress and Fulfilled. Fulfilled requests are kept as history on each project and sub-project page.</p>
+      ${active.length ? active.map(card).join("") : `<div class="empty card">No approved work in progress.</div>`}`;
   }
-  return `
-    ${review.toggleHTML()}
-    ${email.emailsToReview() ? `<a class="card callout-link" href="#/email">${icon("email")} <span><b>${email.emailsToReview()} emailed request${email.emailsToReview() === 1 ? "" : "s"}</b> waiting to be turned into tickets. Duplicates were already filed away.</span> <span class="btn small">Review</span></a>` : ""}
-    <h2 class="section">Waiting for approval <span class="muted">(${pending.length})</span></h2>
-    ${pending.length ? pending.map(card).join("") : `<div class="empty card">All caught up — nothing waiting for approval.</div>`}
-    <h2 class="section">Approved &amp; in progress <span class="muted">(${active.length})</span></h2>
-    ${active.length ? active.map(card).join("") : `<div class="empty card">No approved work in progress.</div>`}`;
+  if (tab === "duplicates") {
+    return `${tabs}<p class="muted small">New requests that match something already rejected. Approve one to put it back in the queue as approved, or reject it to file it with the original in Drafts (it won't be listed twice).</p>
+      ${dups.length ? dups.map(dupCard).join("") : `<div class="empty card">No duplicate requests.</div>`}`;
+  }
+  if (tab === "drafts") {
+    return `${tabs}<p class="muted small">Rejected requests stay here so you can approve them later. Repeat requests for the same thing are counted on the original instead of listed again.</p>
+      ${drafts.length ? drafts.map(draftCard).join("") : `<div class="empty card">No rejected requests.</div>`}`;
+  }
+  if (review.RV.mode === "swipe") return `${tabs}${review.toggleHTML()}${review.swipeHTML()}`;
+  return `${tabs}${review.toggleHTML()}${emailNote}
+    ${pending.length ? pending.map(card).join("") : `<div class="empty card">All caught up — nothing waiting for approval.</div>`}`;
 }
 
 /* ---------------------------------------------------------- request modal */
 async function openRequest(id, refresh = false) {
-  const r = S.requests.find((x) => x.id === id);
+  const r = S.requests.find((x) => x.id === id) || S.allRequests?.find((x) => x.id === id);
   if (!r) { closeModal(); return; }
   if (refresh && !modalRoot.innerHTML) return;
   S.modalId = id;
@@ -543,13 +652,16 @@ async function openRequest(id, refresh = false) {
   const linked = S.actions.some((a) => a.linked_ticket === row.ticket);
   const keepNote = modalRoot.querySelector("#review-note")?.value || "";
   const field = (label, value) => value === "" || value == null ? "" : `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
+  const pool = S.allRequests || S.requests;
+  const dupOf = r.duplicate_of && pool.find((x) => x.id === r.duplicate_of);
+  const repeats = pool.filter((x) => x.duplicate_of === r.id);
 
   modalRoot.innerHTML = `
   <div class="modal-bg" data-act="close-modal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="${esc(row.ticket)}" data-stop>
       <header class="modal-head">
         <div><span class="mono muted">${esc(row.ticket)}</span><h2>${esc(row.item_needed)}</h2>
-          <div class="btn-row">${badge(row.status)} ${badge(row.sub_project || row.project, "proj")} ${row.priority !== "Normal" ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div></div>
+          <div class="btn-row">${badge(row.status)} ${badge(row.sub_project || row.project, "proj")} ${row.priority !== "Normal" && !["Pending", "Duplicate"].includes(r.status) ? badge(row.priority, `p-${slug(row.priority)}`) : ""}</div></div>
         <button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button>
       </header>
       <dl class="facts">
@@ -560,10 +672,16 @@ async function openRequest(id, refresh = false) {
         ${field("FF&E tag", `<span class="mono">${esc(row.ffe_tag)}</span>`)}
         ${field("Specification", esc(row.spec))}
         ${field("Quantity", esc(row.quantity))}
-        ${field("Needed by", `<span class="${isOverdue(row) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}${isOverdue(row) ? " · overdue" : ""}</span>`)}
+        ${field("Attic stock or new", esc(row.fulfillment))}
+        ${row.unit_price !== "" ? field("Item price", `${esc(money(row.unit_price))} each · ${esc(money(row.est_cost))} for ${esc(row.quantity)}<div class="disclaimer">${esc(PRICE_DISCLAIMER)}</div>`) : ""}
+        ${isManager() && ["Approved", "In Progress", "Fulfilled"].includes(r.status) ? field("Priority", priorityPicker(r, "")) : ""}
+        ${field("Desired delivery", `<span class="${isOverdue(row) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}${isOverdue(row) ? " · overdue" : ""}</span>`)}
         ${field("Requested by", `${esc(row.requester_name)} · ${esc(fmtDate(row.created_at))}`)}
         ${row.reviewer_name ? field("Reviewed by", `${esc(row.reviewer_name)} · ${esc(fmtDate(row.reviewed_at))}`) : ""}
+        ${r.status === "Fulfilled" ? field("Fulfilled", `${esc(fmtDate(row.fulfilled_at))}${row.fulfilled_by_name ? ` · ${esc(row.fulfilled_by_name)}` : ""}`) : ""}
       </dl>
+      ${dupOf ? `<div class="dup-of" data-act="open-request" data-id="${esc(dupOf.id)}">${r.status === "Duplicate" ? "Duplicate of" : "Same as"} <b class="mono">${esc(ticketLabel(dupOf.ticket_no))}</b> ${badge(dupOf.status)} “${esc(dupOf.item_needed)}”${dupOf.review_note ? ` <span class="muted small">· ${esc(dupOf.review_note)}</span>` : ""}</div>` : ""}
+      ${repeats.length ? `<p class="small">Requested again ${repeats.length}×: ${repeats.map((x) => `<button class="link-btn mono" data-act="open-request" data-id="${esc(x.id)}">${esc(ticketLabel(x.ticket_no))}</button>`).join(", ")}</p>` : ""}
       ${row.details ? `<div class="note-block"><dt>Additional details</dt><p>${esc(row.details)}</p></div>` : ""}
       ${row.review_note ? `<div class="note-block review"><dt>Manager note</dt><p>${esc(row.review_note)}</p></div>` : ""}
       ${followUpBanner("requests", r)}
@@ -574,15 +692,16 @@ async function openRequest(id, refresh = false) {
           <div class="gallery">${list.map((p) => `<a class="ph" data-path="${esc(p.path)}" target="_blank" rel="noopener"><span class="ph-loading"></span></a>`).join("")}</div>` : "";
       }).join("")}
       <footer class="modal-foot">
-        ${isManager() && r.status === "Pending" ? `
+        ${isManager() && ["Pending", "Duplicate"].includes(r.status) ? `
           <label class="grow">Note to requester <span class="muted">(required to reject)</span><textarea id="review-note" rows="2">${esc(keepNote)}</textarea></label>
           <div class="btn-row">
             <button class="btn reject" data-act="review" data-id="${esc(r.id)}" data-status="Rejected">Reject</button>
             <button class="btn approve" data-act="review" data-id="${esc(r.id)}" data-status="Approved">Approve</button>
           </div>` : ""}
         ${isManager() && r.status === "Approved" ? `<button class="btn" data-act="quick-status" data-id="${esc(r.id)}" data-status="In Progress">Start work</button>` : ""}
-        ${isManager() && ["Approved", "In Progress"].includes(r.status) ? `<button class="btn approve" data-act="quick-status" data-id="${esc(r.id)}" data-status="Completed">Mark completed</button>` : ""}
-        ${mine && r.status === "Pending" ? `<button class="btn" data-act="cancel-request" data-id="${esc(r.id)}">Cancel my request</button>` : ""}
+        ${isManager() && ["Approved", "In Progress"].includes(r.status) ? `<button class="btn approve" data-act="quick-status" data-id="${esc(r.id)}" data-status="Fulfilled">Mark fulfilled</button>` : ""}
+        ${isManager() && r.status === "Rejected" ? `<button class="btn approve" data-act="quick-review" data-id="${esc(r.id)}" data-status="Approved">Approve from Drafts</button>` : ""}
+        ${mine && ["Pending", "Duplicate"].includes(r.status) ? `<button class="btn" data-act="cancel-request" data-id="${esc(r.id)}">Cancel my request</button>` : ""}
         ${isManager() && ["Rejected", "Cancelled"].includes(r.status) ? `<button class="btn" data-act="quick-status" data-id="${esc(r.id)}" data-status="Pending">Reopen</button>` : ""}
         ${r.follow_up_on ? "" : `<button class="btn" data-act="follow-up" data-table="requests" data-id="${esc(r.id)}">Follow up</button>`}
         <button class="btn" data-act="add-to-actions" data-id="${esc(r.id)}" ${linked ? "disabled" : ""}>${linked ? "In my action items" : "Add to my action items"}</button>
@@ -604,14 +723,22 @@ async function openRequest(id, refresh = false) {
 function closeModal() { S.modalId = null; modalRoot.innerHTML = ""; }
 
 async function setRequestStatus(id, status, note) {
+  const r = S.requests.find((x) => x.id === id) || S.allRequests?.find((x) => x.id === id);
   const patch = { status };
   if (status === "Approved" || status === "Rejected") {
     Object.assign(patch, { reviewed_by: S.me.id, reviewer_name: S.me.full_name || S.me.email, reviewed_at: new Date().toISOString() });
     if (note !== undefined) patch.review_note = note;
   }
-  const updated = await guard(() => store.updateRequest(id, patch), `Request ${status.toLowerCase()}`);
+  // An approved duplicate stands on its own; a rejected one stays linked so Drafts shows it once.
+  if (status === "Approved" && r?.status === "Duplicate") patch.duplicate_of = null;
+  if (status === "Fulfilled") Object.assign(patch, { fulfilled_at: new Date().toISOString(), fulfilled_by_name: S.me.full_name || S.me.email });
+  const msg = status === "Approved" ? (r?.status === "Rejected" ? "Approved from Drafts. Set its priority." : "Request approved. Set its priority under Approved & in progress.")
+    : status === "Rejected" && r?.status === "Duplicate" ? "Rejected and filed with the original in Drafts"
+    : status === "Rejected" ? "Request rejected and kept in Drafts" : `Request ${status.toLowerCase()}`;
+  const updated = await guard(() => store.updateRequest(id, patch), msg);
   if (!updated) return;
-  S.requests = S.requests.map((r) => (r.id === id ? updated : r));
+  S.requests = S.requests.map((x) => (x.id === id ? updated : x));
+  if (S.allRequests) S.allRequests = S.allRequests.map((x) => (x.id === id ? updated : x));
   render();
   if (S.modalId === id) openRequest(id);
 }
@@ -827,6 +954,13 @@ const CLICK = {
   "remove-photo"(el) { S.draft.photos.splice(Number(el.dataset.idx), 1); document.getElementById("photo-list").innerHTML = photoListHTML(); },
   "quick-review"(el) { setRequestStatus(el.dataset.id, el.dataset.status, ""); },
   "quick-status"(el) { setRequestStatus(el.dataset.id, el.dataset.status); },
+  "req-scope"(el) {
+    S.reqScope = el.dataset.scope;
+    render();
+    if (S.reqScope === "all" && !S.allRequests) loadAllRequests();
+  },
+  "ap-tab"(el) { S.approvalTab = el.dataset.tab; render(); },
+  "dup-reject"(el) { setRequestStatus(el.dataset.id, "Rejected", "Same as a request already rejected"); },
   review(el) {
     const note = modalRoot.querySelector("#review-note")?.value.trim() || "";
     if (el.dataset.status === "Rejected" && !note) { toast("Add a note explaining the rejection", "err"); modalRoot.querySelector("#review-note")?.focus(); return; }
@@ -907,6 +1041,33 @@ const CLICK = {
 const CHANGE = {
   "req-filter"(el) { S.reqFilter[el.dataset.key] = el.value; document.getElementById("req-table").innerHTML = requestsTableHTML(); },
   photos(el) { addPhotos([...el.files]); el.value = ""; },
+  "req-fulfillment"(el) { S.draft.fulfillment = el.value; refreshAtticHint(el.form); },
+  "req-sub"(el) {
+    S.draft.sub = el.value;
+    // A spec item from another sub-project no longer applies.
+    if (!spec.specsFor(el.value).some((x) => x.id === S.draft.specId)) S.draft.specId = "";
+    el.form.querySelector("#spec-pick").innerHTML = spec.specSelectHTML(el.value, S.draft.specId);
+    refreshSpecPrice(el.form);
+  },
+  "spec-pick"(el) {
+    const prev = spec.specById(S.draft.specId);
+    S.draft.specId = el.value === "other" ? "" : el.value;
+    const item = spec.specById(S.draft.specId);
+    const f = el.form.elements;
+    // Fill from the spec sheet, without overwriting anything the person typed themselves.
+    const fill = (name, from, to) => { if (!f[name].value.trim() || f[name].value === (from || "")) f[name].value = to || ""; };
+    fill("item_needed", prev?.name, item?.name);
+    fill("ffe_tag", prev?.ffe_tag, item?.ffe_tag);
+    fill("spec", prev?.spec, item?.spec);
+    refreshSpecPrice(el.form);
+    refreshAtticHint(el.form);
+  },
+  async "set-priority"(el) {
+    const updated = await guard(() => store.updateRequest(el.dataset.id, { priority: el.value }), `Priority set to ${el.value}`);
+    if (!updated) return;
+    S.requests = S.requests.map((x) => (x.id === updated.id ? updated : x));
+    if (S.modalId === updated.id) openRequest(updated.id);
+  },
   "photo-kind"(el) { S.draft.photos[Number(el.dataset.idx)].kind = el.value; el.closest(".photo-item").classList.toggle("needs", !el.value); },
   "action-filter"(el) { S.actionFilter = el.value; render(); },
   "action-done"(el) {
@@ -930,6 +1091,8 @@ const CHANGE = {
 };
 
 const INPUT = {
+  "req-qty"(el) { refreshSpecPrice(el.form); },
+  "req-tag"(el) { refreshAtticHint(el.form); },
   "req-search"(el) { S.reqFilter.q = el.value; document.getElementById("req-table").innerHTML = requestsTableHTML(); },
   "builder-prompt"(el) { S.builder.prompt = el.value; },
 };
@@ -1012,7 +1175,6 @@ function delegate(root) {
   root.addEventListener("change", (e) => {
     const el = e.target.closest("[data-change]");
     if (el) CHANGE[el.dataset.change]?.(el);
-    if (e.target.name === "sub_project" && e.target.type === "radio" && e.target.closest('[data-form="request"]')) S.draft.sub = e.target.value;
   });
   root.addEventListener("input", (e) => {
     const el = e.target.closest("[data-input]");

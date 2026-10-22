@@ -81,6 +81,10 @@ function createCloudStore() {
       if (SCOPE) q = q.eq("project", SCOPE);
       return check(await q);
     },
+    // Every project's requests (the "All projects" view of All Requests).
+    async listAllRequests() {
+      return check(await sb.from("requests").select("*").order("created_at", { ascending: false }).limit(5000));
+    },
     // Counts for the Projects page (all projects).
     async projectSummary() {
       const [requests, inventory, emails] = await Promise.all([
@@ -98,7 +102,7 @@ function createCloudStore() {
         uploaded.push({ path, kind: p.kind, name: p.name });
       }
       return check(await sb.from("requests")
-        .insert({ project: SCOPE, ...fields, photos: uploaded, requested_by: me.id, requester_name: me.full_name || me.email })
+        .insert({ project: SCOPE, status: "Pending", ...fields, photos: uploaded, requested_by: me.id, requester_name: me.full_name || me.email })
         .select().single());
     },
     // Insert prepared tickets (email conversions, spreadsheet imports); photos are already stored.
@@ -218,6 +222,26 @@ function createCloudStore() {
       return body;
     },
 
+    async listSpecItems() {
+      let q = sb.from("spec_items").select("*").order("sub_project", { nullsFirst: false }).order("name");
+      if (SCOPE) q = q.eq("project", SCOPE);
+      return check(await q);
+    },
+    async saveSpecItem(item) {
+      const { id, created_at, created_by, ...fields } = item;
+      fields.updated_at = new Date().toISOString();
+      return id
+        ? check(await sb.from("spec_items").update(fields).eq("id", id).select().single())
+        : check(await sb.from("spec_items").insert({ project: SCOPE, ...fields }).select().single());
+    },
+    async bulkSaveSpecItems(newItems, updates) {
+      const out = [];
+      for (const part of chunks(newItems)) out.push(...check(await sb.from("spec_items").insert(part.map((i) => ({ project: SCOPE, ...i }))).select()));
+      for (const u of updates) out.push(await this.saveSpecItem(u));
+      return out;
+    },
+    async deleteSpecItem(id) { check(await sb.from("spec_items").delete().eq("id", id)); },
+
     async listInventory() {
       let q = sb.from("inventory_items").select("*").order("sub_project").order("category").order("item_name");
       if (SCOPE) q = q.eq("project", SCOPE);
@@ -283,6 +307,7 @@ function createCloudStore() {
         .on("postgres_changes", { event: "*", schema: "public", table: "email_requests" }, () => onChange("email"))
         .on("postgres_changes", { event: "*", schema: "public", table: "app_settings" }, () => onChange("settings"))
         .on("postgres_changes", { event: "*", schema: "public", table: "documents" }, () => onChange("documents"))
+        .on("postgres_changes", { event: "*", schema: "public", table: "spec_items" }, () => onChange("specs"))
         .subscribe();
       return () => sb.removeChannel(ch);
     },
@@ -291,7 +316,7 @@ function createCloudStore() {
 
 /* -------------------------------------------------------------------- Demo */
 function createDemoStore() {
-  const KEY = "bdr-ffe-demo-v1";
+  const KEY = "bdr-ffe-demo-v2";
   const USER_KEY = "bdr-ffe-demo-user";
   const listeners = new Set();
   const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
@@ -314,7 +339,7 @@ function createDemoStore() {
       mk(2, "The Terrace", { buildings: "12", rooms: "1207", item_needed: "Nightstand drawer pull broken", ffe_tag: "FFE-TER-GR-031", needed_by: addDaysISO(t, -2), status: "Approved", reviewer_name: "Morgan Hale", reviewed_at: new Date().toISOString(), review_note: "Approved – vendor has stock." }),
       mk(3, "Waterpark", { buildings: "Cabana row", rooms: "Cabana 6", item_needed: "Replace faded cabana curtains", ffe_tag: "FFE-WP-CB-006", needed_by: addDaysISO(t, 21), requested_by: "u-or2", requester_name: "Jordan Ruiz" }),
       mk(4, "Resort Center", { buildings: "Main lobby", rooms: "Lobby lounge", item_needed: "Area rug stain – deep clean or replace", ffe_tag: "FFE-RC-LB-002", needed_by: addDaysISO(t, 12), status: "In Progress", priority: "Urgent", reviewer_name: "Morgan Hale", reviewed_at: new Date().toISOString() }),
-      mk(5, "Pickleball", { buildings: "Pavilion", rooms: "Court 3", item_needed: "Two replacement spectator benches", ffe_tag: "FFE-PB-BN-003", quantity: 2, needed_by: addDaysISO(t, 30), status: "Completed", reviewer_name: "Morgan Hale", reviewed_at: new Date().toISOString() }),
+      mk(5, "Pickleball", { buildings: "Pavilion", rooms: "Court 3", item_needed: "Two replacement spectator benches", ffe_tag: "FFE-PB-BN-003", quantity: 2, needed_by: addDaysISO(t, 30), status: "Fulfilled", fulfillment: "order", fulfilled_at: new Date(Date.now() - 3 * 864e5).toISOString(), fulfilled_by_name: "Morgan Hale", reviewer_name: "Morgan Hale", reviewed_at: new Date().toISOString() }),
     ];
     const inv = (sub_project, stock_type, item_name, ffe_tag, category, location, quantity, min_qty, extra = {}) => ({
       id: uid(), project: BDR, sub_project, stock_type, item_name, ffe_tag, category, location, quantity, min_qty, unit: "ea",
@@ -356,7 +381,26 @@ function createDemoStore() {
     requests[4].notes = "Benches installed. Keep one spare in pavilion storage.";
     inventory[1].notes = "Two chairs are on backorder until mid-November.";
     emails.forEach((e) => { if (!e.project) e.project = null; });
-    return { users, requests, actions: [], views: [], inventory, moves, emails, settings, seq: requests.length };
+    // A rejected request (shows in Drafts) and a later, similar one filed as its duplicate.
+    const rejected = mk(7, "The Terrace", { buildings: "14", rooms: "1402", item_needed: "Replace balcony bistro table with a larger one", ffe_tag: "FFE-TER-OD-040", needed_by: addDaysISO(t, 25), status: "Rejected", reviewer_name: "Morgan Hale", reviewed_at: new Date(Date.now() - 2.5 * 864e5).toISOString(), review_note: "Not in this year's budget; revisit in spring.", requested_by: "u-or2", requester_name: "Jordan Ruiz", fulfillment: "order" });
+    requests.push(rejected, mk(8, "The Terrace", { buildings: "14", rooms: "1402", item_needed: "Larger bistro table for balcony", ffe_tag: "FFE-TER-OD-040", needed_by: addDaysISO(t, 20), status: "Duplicate", duplicate_of: rejected.id, fulfillment: "unsure" }));
+    const spec = (sub_project, name, ffe_tag, specText, manufacturer, vendor, unit_price, project = BDR) => ({
+      id: uid(), project, sub_project, name, ffe_tag, spec: specText, manufacturer, vendor, unit_price, unit: "ea", notes: "", created_at: new Date().toISOString(),
+    });
+    const specs = [
+      spec("The Cove", "Balcony lounge chair cushion", "FFE-COV-OD-114", "Sunbrella Canvas Navy, 24×24×4", "Sunbrella", "Coastal Outdoor Supply", 86.5),
+      spec("The Cove", "Dining chair", "FFE-COV-DN-210", "Walnut frame, oatmeal performance fabric", "Bernhardt Hospitality", "Bernhardt", 412),
+      spec("The Cove", "Area rug 8×10", "FFE-COV-LV-050", "Hand-tufted wool, sand", "Loloi", "Loloi Contract", 1180),
+      spec("The Terrace", "Nightstand drawer pull", "FFE-TER-GR-031", "Brass, 4\" centers", "Emtek", "Builders Hardware", 18.75),
+      spec("The Terrace", "Table lamp shade", "FFE-TER-LT-012", "Linen drum, 14\"", "Visual Comfort", "Visual Comfort", 64),
+      spec("The Terrace", "Balcony bistro table", "FFE-TER-OD-040", "Powder-coated aluminum, 30\" round", "Brown Jordan", "Brown Jordan", 690),
+      spec("Waterpark", "Cabana curtain panel", "FFE-WP-CB-006", "Outdoor acrylic, white, 54×108", "Sunbrella", "Coastal Outdoor Supply", 142),
+      spec("Waterpark", "Cabana shade umbrella", "FFE-WP-CB-020", "9' market umbrella, canvas", "Tuuci", "Tuuci", 1350),
+      spec("Pickleball", "Spectator bench", "FFE-PB-BN-003", "Teak slat, 6'", "Kingsley-Bate", "Kingsley-Bate", 975),
+      spec("Resort Center", "Lobby lounge chair", "FFE-RC-LB-010", "Cognac leather, swivel", "Holly Hunt", "Holly Hunt", 2840),
+      spec(null, "Guest room ice bucket", "FFE-GEN-IB-001", "Brushed stainless, lid and tongs", "Room Service Amenities", "Room Service Amenities", 38),
+    ];
+    return { users, requests, actions: [], views: [], inventory, moves, emails, settings, specs, seq: requests.length };
   }
 
   // Same duplicate rules the email-intake function applies.
@@ -413,6 +457,7 @@ function createDemoStore() {
 
     setScope(project) { SCOPE = project || ""; },
     async listRequests() { return load().requests.filter(inScope).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+    async listAllRequests() { return load().requests.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)); },
     async projectSummary() {
       const db = load();
       return { requests: db.requests, inventory: db.inventory, emails: db.emails.filter((e) => e.status === "New") };
@@ -421,7 +466,7 @@ function createDemoStore() {
       const db = load();
       const u = me();
       const r = {
-        project: SCOPE, ...fields, id: uid(), ticket_no: ++db.seq, status: "Pending", requested_by: u.id, requester_name: u.full_name,
+        project: SCOPE, status: "Pending", priority: "Normal", ...fields, id: uid(), ticket_no: ++db.seq, requested_by: u.id, requester_name: u.full_name,
         photos: photos.map((p) => ({ path: uid(), kind: p.kind, name: p.name, data: p.dataUrl })),
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       };
@@ -556,6 +601,23 @@ function createDemoStore() {
     async documentUrl(doc) { return doc.data || ""; },
     async deleteDocument(doc) { const db = load(); db.documents = (db.documents || []).filter((d) => d.id !== doc.id); save(db); },
     async askAssistant() { throw Object.assign(new Error("The AI assistant isn't available in Demo mode"), { status: 503 }); },
+
+    async listSpecItems() { return (load().specs || []).filter(inScope); },
+    async saveSpecItem(item) {
+      const db = load();
+      db.specs = db.specs || [];
+      let x = item.id && db.specs.find((s) => s.id === item.id);
+      if (x) Object.assign(x, item, { updated_at: new Date().toISOString() });
+      else { x = { project: SCOPE, ...item, id: uid(), created_at: new Date().toISOString() }; db.specs.push(x); }
+      save(db);
+      return { ...x };
+    },
+    async bulkSaveSpecItems(newItems, updates) {
+      const out = [];
+      for (const i of [...newItems, ...updates]) out.push(await this.saveSpecItem(i));
+      return out;
+    },
+    async deleteSpecItem(id) { const db = load(); db.specs = (db.specs || []).filter((s) => s.id !== id); save(db); },
 
     async listInventory() { return load().inventory.filter(inScope); },
     async listMoves() {

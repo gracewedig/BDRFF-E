@@ -3,7 +3,7 @@
 import { store } from "./store.js";
 import { CONFIG } from "./config.js";
 import { AREAS, CURRENT, PRIORITIES, PHOTO_KINDS, ticketLabel } from "./fields.js";
-import { findMatches, DUP_THRESHOLD, POSSIBLE_THRESHOLD } from "./dedupe.js";
+import { findMatches, rejectedMatch, DUP_THRESHOLD, POSSIBLE_THRESHOLD } from "./dedupe.js";
 import { S, isManager, hooks } from "./state.js";
 import { modalRoot, esc, opt, badge, fmtDate, toast, guard, icon, openModal, notesChip } from "./ui.js";
 import { followUpBanner } from "./notes.js";
@@ -30,7 +30,7 @@ function fieldsHTML(e) {
   const f = (label, v, required) => `<div><dt>${esc(label)}</dt><dd class="${!v && required ? "missing" : ""}">${v ? esc(v) : required ? "missing" : "—"}</dd></div>`;
   return `<dl class="facts compact">
     ${AREAS.length ? f("Sub-project", e.sub_project, true) : ""}${f("Building(s)", e.buildings, true)}${f("Room(s)", e.rooms, true)}
-    ${f("FF&E tag", e.ffe_tag, true)}${f("Qty", e.quantity)}${f("Needed by", e.needed_by ? fmtDate(e.needed_by) : "", true)}
+    ${f("FF&E tag", e.ffe_tag, true)}${f("Qty", e.quantity)}${f("Desired delivery", e.needed_by ? fmtDate(e.needed_by) : "", true)}
     ${e.priority && e.priority !== "Normal" ? f("Priority", e.priority) : ""}
   </dl>`;
 }
@@ -138,7 +138,7 @@ async function openReview(id) {
         <label>Specification<input name="spec" value="${esc(e.spec || "")}"></label></div>
       <div class="row3"><label>Quantity<input name="quantity" type="number" min="1" value="${esc(e.quantity || 1)}"></label>
         <label>Priority<select name="priority">${PRIORITIES.map((p) => opt(p, p, (e.priority || "Normal") === p)).join("")}</select></label>
-        <label>Needed by <em>*</em><input name="needed_by" type="date" value="${esc(e.needed_by || "")}"></label></div>
+        <label>Desired delivery date <em>*</em><input name="needed_by" type="date" value="${esc(e.needed_by || "")}"></label></div>
       ${atts.length ? `<div><h3 class="ph-head">Photos from the email</h3><div class="photo-list">${atts.map((a, i) => `
         <div class="photo-item"><span class="ph sm" data-path="${esc(a.path)}"><span class="ph-loading"></span></span>
           <div class="stack tight"><span class="small ellipsis">${esc(a.name || "photo")}</span>
@@ -178,9 +178,11 @@ async function convert(form, mode) {
   const photos = (e.attachments || []).map((a, i) => ({ ...a, kind: fd.get(`kind_${i}`) || a.kind || "damage" }));
   const now = new Date().toISOString();
   const reviewer = { reviewed_by: S.me.id, reviewer_name: S.me.full_name || S.me.email, reviewed_at: now };
+  // "Create as pending" for something already rejected files it with the rejected one.
+  const again = mode === "approve" ? null : rejectedMatch(fields, S.requests);
   const created = await guard(async () => {
     const [r] = await store.insertRequests([{
-      ...fields, photos, source: "email", source_ref: e.id, status: "Pending",
+      ...fields, photos, source: "email", source_ref: e.id, ...(again ? { status: "Duplicate", duplicate_of: again.root.id } : { status: "Pending" }),
       requester_name: sender?.full_name || e.from_name || e.from_email || "Email",
     }]);
     const final = mode === "approve" ? await store.updateRequest(r.id, { status: "Approved", ...reviewer, review_note: "" }) : r;

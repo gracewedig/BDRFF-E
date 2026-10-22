@@ -87,7 +87,7 @@ function movesHTML(moves, limit = 12) {
       return `<tr>
         <td data-label="When" class="small">${esc(fmtTime(m.moved_at))}</td>
         <td data-label="Item">${it ? `<button class="link-btn" data-act="open-item" data-id="${esc(it.id)}">${esc(it.item_name)}</button><div class="muted small">${esc(it.sub_project || CURRENT.project)}</div>` : '<span class="muted">Deleted item</span>'}</td>
-        <td data-label="">${m.direction === "out" ? badge("Out", "out") : badge("Returned", "completed")}</td>
+        <td data-label="">${m.direction === "out" ? badge("Out", "out") : badge("Returned", "fulfilled")}</td>
         <td data-label="Qty" class="num">${esc(m.quantity)} <span class="muted small">→ ${esc(m.qty_after)} left</span></td>
         <td data-label="Where it went">${esc(where(m)) || '<span class="muted">—</span>'}</td>
         <td data-label="Ticket" class="mono">${esc(m.linked_ticket || "")}</td>

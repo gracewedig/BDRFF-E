@@ -48,7 +48,7 @@ export function swipeHTML() {
         <h2>${esc(row.item_needed)}</h2>
         <dl class="facts compact">
           ${fact("Building(s)", esc(row.buildings))}${fact("Room(s)", esc(row.rooms))}${fact("FF&E tag", `<span class="mono">${esc(row.ffe_tag)}</span>`)}
-          ${fact("Qty", esc(row.quantity))}${fact("Needed by", `<span class="${isOverdue(row) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}</span>`)}
+          ${fact("Qty", esc(row.quantity))}${fact("Desired delivery", `<span class="${isOverdue(row) ? "overdue" : ""}">${esc(fmtDate(row.needed_by))}</span>`)}
           ${fact("Requested by", esc(row.requester_name))}${row.source !== "App" ? fact("Source", esc(row.source)) : ""}
         </dl>
         ${row.spec ? `<p class="small"><b>Spec:</b> ${esc(row.spec)}</p>` : ""}

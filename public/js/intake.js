@@ -1,8 +1,8 @@
 // Spreadsheet intake: read Excel/CSV files, match their columns, sort every row
 // into a sub-project, flag duplicates, then import as inventory or as requests.
 import { store } from "./store.js";
-import { AREAS, CURRENT, STOCK_TYPES, PRIORITIES, matchSubProject, todayISO, addDaysISO, ticketLabel } from "./fields.js";
-import { findMatches, DUP_THRESHOLD } from "./dedupe.js";
+import { AREAS, CURRENT, STOCK_TYPES, matchSubProject, fulfillmentFrom, todayISO, addDaysISO, ticketLabel } from "./fields.js";
+import { findMatches, rejectedMatch, DUP_THRESHOLD } from "./dedupe.js";
 import { S, hooks } from "./state.js";
 import { esc, opt, badge, toast, guard, icon } from "./ui.js";
 import { downloadWorkbook } from "./export.js";
@@ -36,16 +36,31 @@ const TARGETS = {
       { key: "ffe_tag", label: "FF&E tag", syn: ["ff&e tag", "ffe tag", "tag", "tag #", "tag number", "item code", "code", "sku"] },
       { key: "spec", label: "Specification", syn: ["spec", "specification", "specs", "finish", "model"] },
       { key: "quantity", label: "Quantity", syn: ["qty", "quantity", "count", "units"] },
-      { key: "priority", label: "Priority", syn: ["priority", "urgency"] },
-      { key: "needed_by", label: "Needed by", syn: ["needed by", "need by", "due", "due date", "date needed", "deadline", "needed"] },
+      { key: "fulfillment", label: "Attic stock or order new", syn: ["attic stock or order", "attic or order", "attic stock / order", "pull or order", "fulfillment", "source", "order new"] },
+      { key: "needed_by", label: "Desired delivery date", syn: ["desired delivery", "desired delivery date", "delivery date", "delivery", "needed by", "need by", "due", "due date", "date needed", "deadline", "needed"] },
       { key: "requester_name", label: "Requested by", syn: ["requested by", "requester", "submitted by", "name", "contact"] },
       { key: "details", label: "Details / notes", syn: ["details", "notes", "comments", "remarks"] },
+    ],
+  },
+  specs: {
+    label: "Spec sheet (items and prices)",
+    fields: [
+      { key: "name", label: "Item", required: true, syn: ["item", "item name", "name", "description", "item description", "product", "ffe item", "ff&e item"] },
+      { key: "sub_project", label: "Sub-project", syn: ["sub project", "sub-project", "subproject", "project", "area", "property", "site"] },
+      { key: "ffe_tag", label: "FF&E tag", syn: ["ff&e tag", "ffe tag", "tag", "tag #", "tag number", "item code", "code", "sku", "spec #", "spec number", "item #", "item number"] },
+      { key: "spec", label: "Spec", syn: ["spec", "specification", "specs", "finish", "model", "size", "details", "color"] },
+      { key: "manufacturer", label: "Manufacturer", syn: ["manufacturer", "mfr", "mfg", "brand", "maker"] },
+      { key: "vendor", label: "Vendor", syn: ["vendor", "supplier", "source", "dealer"] },
+      { key: "unit_price", label: "Item price", syn: ["price", "unit price", "unit cost", "cost", "item price", "each", "price each", "cost each", "amount"] },
+      { key: "unit", label: "Unit", syn: ["unit", "uom", "unit of measure"] },
+      { key: "notes", label: "Notes", syn: ["notes", "note", "comments", "remarks"] },
     ],
   },
 };
 
 const norm = (s) => String(s ?? "").toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]/g, "");
 const clean = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+const money = (v) => { const n = parseFloat(String(v ?? "").replace(/[$, ]/g, "")); return Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
 const num = (v) => { const n = parseFloat(String(v ?? "").replace(/[, ]/g, "")); return Number.isFinite(n) ? Math.round(n) : null; };
 
 function parseDate(v) {
@@ -145,7 +160,7 @@ function buildRows() {
   const imp = S.imp;
   const fields = TARGETS[imp.target].fields;
   const out = [];
-  const openRequests = S.requests.filter((r) => !["Rejected", "Cancelled"].includes(r.status));
+  const openRequests = S.requests.filter((r) => !["Rejected", "Cancelled", "Fulfilled"].includes(r.status));
   for (const sh of imp.sheets) {
     const sheetProject = matchSubProject(sh.name);
     const sheetType = stockTypeFrom(sh.name);
@@ -173,9 +188,16 @@ function buildRows() {
         if (!v.item_name) row.issues.push("No item name");
         const ex = (project || !AREAS.length) && v.item_name ? existingItem(project, v) : null;
         if (ex) { row.status = "update"; row.existing = ex; row.note = `Updates existing · on hand ${ex.quantity} → ${v.quantity}`; }
+      } else if (imp.target === "specs") {
+        v.unit_price = money(v.unit_price);
+        if (!v.name) row.issues.push("No item name");
+        const tag = normTag(v.ffe_tag);
+        const ex = v.name && S.specs.find((x) => (x.sub_project || "") === (project || "")
+          && (tag ? normTag(x.ffe_tag) === tag : !x.ffe_tag && x.name.toLowerCase() === v.name.toLowerCase()));
+        if (ex) { row.status = "update"; row.existing = ex; row.note = ex.unit_price !== v.unit_price && v.unit_price != null ? `Updates existing · price ${ex.unit_price ?? "none"} → ${v.unit_price}` : "Updates existing"; }
       } else {
         v.quantity = Math.max(1, num(v.quantity) ?? 1);
-        v.priority = PRIORITIES.find((p) => norm(p) === norm(v.priority)) || (/urgent|asap/i.test(v.priority) ? "Urgent" : "Normal");
+        v.fulfillment = fulfillmentFrom(v.fulfillment);
         v.needed_by = parseDate(v.needed_by);
         if (!v.item_needed) row.issues.push("Nothing described");
         if (!v.needed_by) row.note = "No date given · set to 30 days out";
@@ -184,10 +206,14 @@ function buildRows() {
           if (m && m.score >= DUP_THRESHOLD) {
             row.status = "duplicate";
             row.note = `Already requested: ${ticketLabel(m.item.ticket_no)} (${m.reasons.join(", ")})`;
+          } else {
+            const again = rejectedMatch({ ...v, project: CURRENT.project, sub_project: project }, S.requests);
+            if (again) { row.duplicateOf = again.root.id; row.note = `Like rejected ${ticketLabel(again.root.ticket_no)} · goes to Duplicate requests`; }
           }
         }
       }
-      if (!project && AREAS.length) row.issues.push("No sub-project");
+      // Spec items without a sub-project apply to every sub-project.
+      if (!project && AREAS.length && imp.target !== "specs") row.issues.push("No sub-project");
       row.include = ov.include !== undefined ? ov.include : !row.issues.length && row.status !== "duplicate";
       if (Object.values(v).some((x) => x !== "" && x != null && x !== 0) || Object.values(raw).some((c) => clean(c))) out.push(row);
     });
@@ -202,8 +228,11 @@ function templateDownload(target) {
       .map((label) => ({ key: label, label }));
     const tabs = AREAS.length ? AREAS : [CURRENT.project];
     downloadWorkbook(`${CURRENT.project} Inventory Import Template`, tabs.map((p) => ({ name: p, columns: cols, rows: [] })));
+  } else if (target === "specs") {
+    const cols = ["Sub-project", "Item", "FF&E Tag", "Spec", "Manufacturer", "Vendor", "Item Price", "Unit", "Notes"].map((label) => ({ key: label, label }));
+    downloadWorkbook(`${CURRENT.project} Spec Sheet Import Template`, [{ name: "Spec Sheet", columns: cols, rows: [] }]);
   } else {
-    const cols = ["Sub-project", "Building(s)", "Room(s)", "What's Needed", "FF&E Tag", "Specification", "Quantity", "Priority", "Needed By", "Requested By", "Details"]
+    const cols = ["Sub-project", "Building(s)", "Room(s)", "What's Needed", "FF&E Tag", "Specification", "Quantity", "Attic Stock or Order", "Desired Delivery Date", "Requested By", "Details"]
       .map((label) => ({ key: label, label }));
     downloadWorkbook(`${CURRENT.project} Request Import Template`, [{ name: "Requests", columns: cols, rows: [] }]);
   }
@@ -223,7 +252,8 @@ export function pageImport() {
       </label>
       <p class="muted small">Need a starting point? Download a template:
         <button class="link-btn accent" data-act="imp-template" data-target="inventory">Inventory${AREAS.length ? " (one tab per sub-project)" : ""}</button> ·
-        <button class="link-btn accent" data-act="imp-template" data-target="requests">Requests</button></p>
+        <button class="link-btn accent" data-act="imp-template" data-target="requests">Requests</button> ·
+        <button class="link-btn accent" data-act="imp-template" data-target="specs">Spec sheet</button></p>
     </div>`;
   }
   const t = TARGETS[imp.target];
@@ -239,7 +269,8 @@ export function pageImport() {
   const shown = rows.slice(0, 300);
   const cols = imp.target === "inventory"
     ? [["stock_type", "Type"], ["item_name", "Item"], ["ffe_tag", "FF&E Tag"], ["location", "Location"], ["quantity", "Qty"]]
-    : [["buildings", "Bldg"], ["rooms", "Room"], ["item_needed", "What's needed"], ["ffe_tag", "FF&E Tag"], ["needed_by", "Needed by"]];
+    : imp.target === "specs" ? [["name", "Item"], ["ffe_tag", "FF&E Tag"], ["spec", "Spec"], ["unit_price", "Item price"]]
+    : [["buildings", "Bldg"], ["rooms", "Room"], ["item_needed", "What's needed"], ["ffe_tag", "FF&E Tag"], ["needed_by", "Delivery"]];
 
   return `
   <div class="card intake-file">
@@ -251,7 +282,7 @@ export function pageImport() {
   <div class="card">
     <div class="row3">
       <label>Import into<select data-change="imp-target">${Object.entries(TARGETS).map(([k, x]) => opt(k, x.label, imp.target === k)).join("")}</select></label>
-      ${AREAS.length ? `<label>Rows with no sub-project go to<select data-change="imp-default-project">${opt("", "Nowhere — I'll pick")}${AREAS.map((p) => opt(p, p, imp.defaultProject === p)).join("")}</select></label>` : `<label>Project<input value="${esc(CURRENT.project)}" disabled></label>`}
+      ${AREAS.length ? `<label>Rows with no sub-project go to<select data-change="imp-default-project">${opt("", imp.target === "specs" ? "Every sub-project" : "Nowhere — I'll pick")}${AREAS.map((p) => opt(p, p, imp.defaultProject === p)).join("")}</select></label>` : `<label>Project<input value="${esc(CURRENT.project)}" disabled></label>`}
       ${imp.target === "inventory" ? `<label>Type when the sheet doesn't say<select data-change="imp-default-type">${STOCK_TYPES.map((s) => opt(s, s, imp.defaultStockType === s)).join("")}</select></label>` : "<span></span>"}
     </div>
     <details ${Object.keys(imp.mapping).length < 2 ? "open" : ""}>
@@ -283,7 +314,7 @@ export function pageImport() {
           ${AREAS.length ? `<td data-label="Sub-project"><select data-change="imp-row-project" data-idx="${i}" class="${r.project ? "" : "invalid"}">${opt("", "Choose…")}${AREAS.map((p) => opt(p, p, r.project === p)).join("")}</select>
             ${r.how && r.how !== "set by you" ? `<div class="muted tiny">from ${esc(r.how)}</div>` : ""}</td>` : ""}
           ${cols.map(([k, l]) => `<td data-label="${esc(l)}">${esc(r.v[k])}</td>`).join("")}
-          <td data-label="Status">${r.issues.length ? badge(r.issues.join(", "), "rejected") : r.status === "update" ? badge("Update", "approved") : r.status === "duplicate" ? badge("Duplicate", "pending") : badge("New", "completed")}
+          <td data-label="Status">${r.issues.length ? badge(r.issues.join(", "), "rejected") : r.status === "update" ? badge("Update", "approved") : r.status === "duplicate" ? badge("Duplicate", "pending") : badge("New", "fulfilled")}
             ${r.note ? `<div class="muted tiny">${esc(r.note)}</div>` : ""}</td>
         </tr>`).join("")}
       </tbody></table></div>
@@ -298,7 +329,7 @@ export function pageImport() {
 
 async function runImport() {
   const imp = S.imp;
-  const rows = imp.rows.filter((r) => r.include && !r.issues.length && (r.project || !AREAS.length));
+  const rows = imp.rows.filter((r) => r.include && !r.issues.length && (r.project || !AREAS.length || imp.target === "specs"));
   if (!rows.length) return;
   imp.busy = true;
   hooks.render();
@@ -316,12 +347,26 @@ async function runImport() {
     toast(`Imported ${fresh.length} new item${fresh.length === 1 ? "" : "s"}${updates.length ? `, updated ${updates.length}` : ""}`);
     S.imp = null;
     location.hash = "#/inventory";
+  } else if (imp.target === "specs") {
+    const fresh = [], updates = [];
+    for (const r of rows) {
+      const item = Object.fromEntries(Object.entries({ ...r.v, sub_project: r.project || null }).filter(([k, x]) => (x !== "" && x != null) || k === "sub_project"));
+      if (r.existing) updates.push({ ...r.existing, ...item, id: r.existing.id });
+      else fresh.push({ unit: "ea", ...item });
+    }
+    const ok = await guard(async () => { await store.bulkSaveSpecItems(fresh, updates); S.specs = await store.listSpecItems(); return true; });
+    imp.busy = false;
+    if (!ok) { hooks.render(); return; }
+    toast(`Added ${fresh.length} spec item${fresh.length === 1 ? "" : "s"}${updates.length ? `, updated ${updates.length}` : ""}`);
+    S.imp = null;
+    location.hash = "#/spec";
   } else {
     const later = addDaysISO(todayISO(), 30);
     const payload = rows.map((r) => ({
       sub_project: r.project || null, buildings: r.v.buildings || "TBD", rooms: r.v.rooms || "TBD", item_needed: r.v.item_needed,
-      ffe_tag: r.v.ffe_tag || "TBD", spec: r.v.spec, quantity: r.v.quantity, priority: r.v.priority,
-      needed_by: r.v.needed_by || later, details: r.v.details, source: "import", status: "Pending",
+      ffe_tag: r.v.ffe_tag || "TBD", spec: r.v.spec, quantity: r.v.quantity, fulfillment: r.v.fulfillment || null,
+      needed_by: r.v.needed_by || later, details: r.v.details, source: "import",
+      ...(r.duplicateOf ? { status: "Duplicate", duplicate_of: r.duplicateOf } : { status: "Pending" }),
       ...(r.v.requester_name ? { requester_name: r.v.requester_name } : {}),
     }));
     const created = await guard(() => store.insertRequests(payload));
@@ -352,7 +397,9 @@ export const CHANGE = {
     const headers = [...new Set(sheets.flatMap((s) => s.headers))];
     // Guess the target: quantities/locations suggest inventory; rooms/needed-by suggest requests.
     const h = norm(headers.join(" "));
-    const target = /neededby|duedate|room/.test(h) && !/onhand|par|storage/.test(h) ? "requests" : "inventory";
+    const target = S.impTarget === "specs" || (/price|cost/.test(h) && !/room|onhand/.test(h)) ? "specs"
+      : /neededby|duedate|delivery|room/.test(h) && !/onhand|par|storage/.test(h) ? "requests" : "inventory";
+    S.impTarget = "";
     S.imp = {
       fileName: file.name, sheets, headers, target, mapping: guessMapping(sheets, TARGETS[target].fields),
       defaultProject: "", defaultStockType: "Attic Stock", overrides: {}, rows: [], busy: false,

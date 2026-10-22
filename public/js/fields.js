@@ -47,9 +47,23 @@ export function setCurrentProject(name) {
 
 export const projectDef = (name) => SETTINGS.projects.find((p) => p.name === name);
 export const subProjects = (project) => projectDef(project)?.subprojects || [];
-export const STATUSES = ["Pending", "Approved", "In Progress", "Completed", "Rejected", "Cancelled"];
+export const STATUSES = ["Pending", "Duplicate", "Approved", "In Progress", "Fulfilled", "Rejected", "Cancelled"];
 export const OPEN_STATUSES = ["Pending", "Approved", "In Progress"];
-export const CLOSED_STATUSES = ["Completed", "Rejected", "Cancelled"];
+export const CLOSED_STATUSES = ["Fulfilled", "Rejected", "Cancelled"];
+// How the requester expects the item to be filled.
+export const FULFILLMENT = { attic: "Pull from attic stock", order: "Order new", unsure: "Not sure if we have it in attic stock" };
+export const PRICE_DISCLAIMER = "Price is for the item only. It doesn't include shipping, freight or installation.";
+// Reads "attic", "order new", "not sure"… from a spreadsheet cell or AI answer.
+export const fulfillmentFrom = (v) => {
+  const t = String(v || "").toLowerCase();
+  if (!t) return "";
+  if (FULFILLMENT[t]) return t;
+  if (/not sure|unsure|unknown|\?|check/.test(t)) return "unsure";
+  if (/attic|stock|pull|on hand/.test(t)) return "attic";
+  if (/order|new|buy|purchase/.test(t)) return "order";
+  return "";
+};
+export const money = (n) => (n === "" || n == null || isNaN(Number(n)) ? "" : Number(n).toLocaleString("en-US", { style: "currency", currency: "USD" }));
 export const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 export const ACTION_STATUSES = ["Not Started", "In Progress", "Waiting", "Done"];
 export const PHOTO_KINDS = { concept: "Concept image", damage: "Proof of damage" };
@@ -93,6 +107,7 @@ export function matchLocation(text, hint = "") {
 // Columns available in the overall spreadsheet and in custom views.
 export const FIELDS = [
   { key: "ticket", label: "Ticket #", type: "text" },
+  { key: "project", label: "Project", type: "text" },
   { key: "sub_project", label: "Sub-project", type: "enum", options: AREAS },
   { key: "buildings", label: "Building(s)", type: "text" },
   { key: "rooms", label: "Room(s)", type: "text" },
@@ -101,8 +116,11 @@ export const FIELDS = [
   { key: "spec", label: "Specification", type: "text" },
   { key: "quantity", label: "Qty", type: "number" },
   { key: "priority", label: "Priority", type: "enum", options: PRIORITIES },
-  { key: "needed_by", label: "Needed By", type: "date" },
-  { key: "days_until_due", label: "Days Until Due", type: "number" },
+  { key: "needed_by", label: "Desired Delivery", type: "date" },
+  { key: "days_until_due", label: "Days Until Delivery", type: "number" },
+  { key: "fulfillment", label: "Attic Stock / Order", type: "enum", options: Object.values(FULFILLMENT) },
+  { key: "unit_price", label: "Item Price", type: "number" },
+  { key: "est_cost", label: "Est. Item Cost", type: "number" },
   { key: "status", label: "Status", type: "enum", options: STATUSES },
   { key: "details", label: "Additional Details", type: "text" },
   { key: "requester_name", label: "Requested By", type: "text" },
@@ -115,6 +133,8 @@ export const FIELDS = [
   { key: "source", label: "Source", type: "enum", options: Object.values(SOURCES) },
   { key: "notes", label: "Notes", type: "text" },
   { key: "follow_up_on", label: "Follow-up Date", type: "date" },
+  { key: "fulfilled_at", label: "Fulfilled On", type: "date" },
+  { key: "fulfilled_by_name", label: "Fulfilled By", type: "text" },
 ];
 export const FIELD_KEYS = FIELDS.map((f) => f.key);
 export const FIELD_MAP = Object.fromEntries(FIELDS.map((f) => [f.key, f]));
@@ -193,9 +213,14 @@ export function toRow(r, today = todayISO()) {
     source: SOURCES[r.source] || SOURCES.app,
     notes: r.notes || "",
     follow_up_on: (r.follow_up_on || "").slice(0, 10),
+    fulfillment: FULFILLMENT[r.fulfillment] || "",
+    unit_price: r.unit_price ?? "",
+    est_cost: r.unit_price != null && r.unit_price !== "" ? Math.round(Number(r.unit_price) * Number(r.quantity || 1) * 100) / 100 : "",
+    fulfilled_at: (r.fulfilled_at || "").slice(0, 10),
+    fulfilled_by_name: r.fulfilled_by_name || "",
   };
 }
 
 export function isOverdue(row, today = todayISO()) {
-  return !!row.needed_by && row.needed_by < today && !CLOSED_STATUSES.includes(row.status);
+  return !!row.needed_by && row.needed_by < today && !CLOSED_STATUSES.includes(row.status) && row.status !== "Duplicate";
 }

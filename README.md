@@ -10,15 +10,18 @@ A web app for FF&E (furniture, fixtures & equipment) requests, approvals, invent
 | Area | What it does |
 |---|---|
 | **Projects** | After signing in, everyone picks the project they're working on. Then they click into sub-projects (open requests, inventory, low stock) with **back arrows** and **‹ › arrows** to browse between them. Managers add projects and sub-projects right on these pages. |
-| **Requests** | Detailed tickets: sub-project, building(s), room(s), what's needed, FF&E tag/spec, quantity, needed-by date, and photos marked *Concept image* or *Proof of damage*. Each gets a number like `REQ-0012`. If someone submits something that's already been requested, the app shows the matching ticket first. |
+| **Requests** | Detailed tickets: *pull from attic stock / order new / not sure*, sub-project, building(s), room(s), the item picked from the **spec sheet** (tag, spec and item price fill in; prices exclude shipping, freight and install), quantity, desired delivery date, and photos marked *Concept image* or *Proof of damage*. Each gets a number like `REQ-0012`. Requesters don't set priority; managers do after approving. **All Requests** switches between this project and all projects. If someone submits something that's already been requested, the app shows the matching ticket first. |
+| **Spec Sheet** | The FF&E items and item prices for each sub-project (or every sub-project). Everyone can browse and export it; managers add, edit, or import it from a spreadsheet. |
+| **Duplicates & Drafts** | A new request that matches one already rejected goes to **Duplicate requests**, shown next to the original. Rejected requests stay in **Drafts** so they can be approved later; rejecting a duplicate files it with the original, so each need shows once (“Requested again 2×”). |
+| **Fulfilled history** | Every project and sub-project page keeps a record of what was fulfilled, when and by whom, with item cost on file and an Excel export. |
 | **Notes on everything** | Requests, inventory items and emailed requests all have notes. **Hover the note icon to read them**, click to add or edit. |
 | **Follow-ups** | Set a follow-up date and note on any ticket, including rejected or cancelled ones, or on a dismissed email; it can go straight onto your action items. Filters for “Rejected & cancelled” and “Has a follow-up”, plus a dashboard tile for follow-ups due this week. |
 | **Email Requests** (separate tab) | Emails sent to an FF&E inbox become draft tickets automatically (photos included). Anything already submitted, or already emailed, is filed under **Auto-matched duplicates**, so managers review each request once. **Dismissed** emails stay visible with who dismissed them and why, so anyone can follow up, and managers can bring them back or create a ticket anyway. |
 | **My Outlook Report** | **Anyone** can connect their own Outlook. The app reads their recent inbox (in their browser) and reports which FF&E requests are coming up: what's needed when, what's urgent, and whether each one is already a ticket. New ones can be sent to Email Requests with one click; the report can be copied or exported. |
 | **Files & Assistant** | Upload spreadsheets and PDFs (punch lists, inspection reports, spec books) from any sub-project page or the Files page. Files are kept with the project so anyone can open them later. The assistant reads them and proposes requests, **each routed to the sub-project it belongs to**, skips anything already requested, and lets you **chat** about how to organize it before you confirm. Long files are read in sections; scanned PDFs up to 4 MB are supported. |
-| **Approvals** (managers) | **Swipe review**: one card at a time, ✓ / drag right to approve, ✗ / drag left to reject, *Later* to skip, *Undo*. Or switch to the list view. Then *In Progress* → *Completed*; rejected or cancelled tickets can be reopened. |
+| **Approvals** (managers) | **Swipe review**: one card at a time, ✓ / drag right to approve, ✗ / drag left to reject, *Later* to skip, *Undo*. Or switch to the list view. Then set the priority, *In Progress* → *Fulfilled*. Tabs for *Duplicate requests* and *Drafts (rejected)*. |
 | **Inventory & Attic Stock** | Per-sub-project views (attic stock vs. inventory, low-stock warnings against par levels). **Take out** stock and optionally record where it went; return/add stock; full movement log; Excel export with one tab per sub-project. |
-| **Import Spreadsheet** (managers) | Excel/CSV for inventory or requests, sorted into sub-projects by column, tab name or row text, with a full preview first. |
+| **Import Spreadsheet** (managers) | Excel/CSV for inventory, requests or the spec sheet (prices), sorted into sub-projects by column, tab name or row text, with a full preview first. |
 | **My Action Items & Sheet Builder** | A private checklist, personal/combined Excel exports, and plain-English custom sheets you can pin to your dashboard. |
 | **Team & Roles / Settings** (managers) | Invite people by email, change roles, remove people. Rename, reorder and archive projects and sub-projects; edit the option lists used in forms (categories, storage locations, units). |
 | **How to Use** | A written guide for each part of the app and a **guided walkthrough** that steps through the real screens in order, offered automatically the first time someone signs in. |
@@ -74,7 +77,7 @@ You need **Supabase** (free tier: logins, database, photos) and **Netlify** (hos
 ```
 For reliable delivery to your team, set up your own sender under **Authentication → Emails → SMTP Settings** (e.g. your Microsoft 365 mailbox or Resend); Supabase's built-in sender is only for testing.
 
-**Updating the database:** when a new version adds features (like Files), re-run all of `supabase/schema.sql` in the SQL Editor. It's safe to run again and keeps your data.
+**Updating the database:** when a new version adds features (like Files or the Spec Sheet), re-run all of `supabase/schema.sql` in the SQL Editor. It's safe to run again and keeps your data.
 
 ### 4. Hook up the shared FF&E inbox
 Email intake address (shown to managers on the Email Requests tab):
@@ -118,6 +121,7 @@ public/                       the website (what Netlify publishes)
   js/settings.js              projects, sub-projects and option lists
   js/outlook.js               My Outlook Report
   js/help.js                  How to Use guide and walkthrough
+  js/spec.js                  spec sheet, item prices on the request form
   js/inventory.js             inventory & attic stock
   js/intake.js                spreadsheet import
   js/email.js                 email requests

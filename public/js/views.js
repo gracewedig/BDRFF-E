@@ -115,7 +115,7 @@ export function localSpecFromPrompt(prompt) {
 
   const statusWords = {
     Pending: /pending|awaiting approval|needs? approval|unapproved/, Approved: /\bapproved\b/,
-    "In Progress": /in progress|being worked/, Completed: /completed|\bdone\b|finished|closed/,
+    "In Progress": /in progress|being worked/, Fulfilled: /fulfilled|completed|\bdone\b|finished|closed/, Duplicate: /duplicate/,
     Rejected: /rejected|denied/, Cancelled: /cancel/,
   };
   let statuses = STATUSES.filter((s) => statusWords[s].test(p));

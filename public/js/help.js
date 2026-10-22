@@ -27,7 +27,7 @@ const STEPS = [
   { route: "#/dashboard", sel: ".kpis", needsProject: true, title: "Dashboard",
     body: "Your project at a glance: open requests, what's waiting for approval, overdue items, emails to review, low stock, your action items and follow-ups due this week. Click a tile to jump to that list." },
   { route: "#/new", sel: ".request-form", needsProject: true, title: "New request",
-    body: "Submit an FF&E request. Be specific: sub-project, building(s), room number(s), what's needed, the FF&E tag, quantity, the date it's needed by, and at least one photo marked Concept image or Proof of damage. If it's already been requested, the app shows you the existing ticket." },
+    body: "Submit an FF&E request. First say whether it should be pulled from attic stock, ordered new, or you're not sure. Then pick the sub-project and choose the item from its spec sheet (the item price fills in automatically; it doesn't include shipping, freight or install). Add building(s), room number(s), quantity, the desired delivery date and at least one photo marked Concept image or Proof of damage. Managers set the priority after approving." },
   { route: "#/requests", sel: "#req-table", needsProject: true, title: "All requests",
     body: "Everyone can see every request. Search and filter by sub-project or status, including Rejected & cancelled for anything that needs a follow-up. Hover the note icon on a row to read its notes, or click it to add some. Click a row to open the ticket." },
   { route: "#/email", sel: ".email-intro", needsProject: true, title: "Email requests",
@@ -207,7 +207,10 @@ const GUIDE = [
     "Switch projects any time by clicking the project name at the top of the menu.",
   ] },
   { title: "Submitting a request", body: [
-    "Go to New Request. Pick the sub-project, then fill in building(s), room number(s), what you need, the FF&E tag (and specification if you know it), quantity and the date it's needed by.",
+    "Go to New Request. Choose Pull from attic stock, Order new, or Not sure if we have it in attic stock.",
+    "Pick the sub-project, then choose the item from the FF&E spec dropdown. The tag, spec and item price fill in for you (the price is for the item only, not shipping, freight or install). If it isn't listed, choose Not listed and describe it.",
+    "Fill in building(s), room number(s), quantity and the desired delivery date. You don't set the priority; managers do after approving.",
+    "If it matches something managers already rejected, it's filed under Duplicate requests next to the original, so they see them together.",
     "Add at least one photo and mark each as Concept image (what it should look like) or Proof of damage.",
     "If the same thing was already requested, you'll see that ticket first so it isn't submitted twice.",
   ] },
@@ -231,7 +234,9 @@ const GUIDE = [
   { title: "Approvals", manager: true, body: [
     "Approvals shows pending tickets one card at a time: ✓ or drag right to approve, ✗ or drag left to reject (add an optional note first), Later to skip, Undo to take it back. Arrow keys work too.",
     "Switch to List to see everything at once.",
-    "Move approved work to In Progress, then Completed. Rejected or cancelled tickets can be reopened.",
+    "After approving, set the priority. Move work to In Progress, then Fulfilled; fulfilled work is kept as history on each project and sub-project page.",
+    "Duplicate requests lists new requests that match something already rejected. Approve one, or reject it to file it with the original.",
+    "Drafts keeps rejected requests so you can approve them later. Repeat requests are counted on the original (\"Requested again 2×\") instead of listed again.",
   ] },
   { title: "Inventory and attic stock", body: [
     "Inventory shows attic stock and inventory for each sub-project, with low-stock warnings against par levels.",

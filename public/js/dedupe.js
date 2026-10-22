@@ -60,3 +60,15 @@ export function findMatches(candidate, pool, limit = 5, min = 0.25) {
     .sort((x, y) => y.score - x.score)
     .slice(0, limit);
 }
+
+// A new request that matches one managers already rejected is filed as a
+// Duplicate of the original rejected request (the root), so Drafts only ever
+// shows that one, however many times it's asked for again.
+export function rejectedMatch(candidate, requests) {
+  const byId = new Map(requests.map((r) => [r.id, r]));
+  const [m] = findMatches(candidate, requests.filter((r) => r.status === "Rejected"), 1);
+  if (!m || m.score < DUP_THRESHOLD) return null;
+  let root = m.item;
+  for (let i = 0; i < 5 && root.duplicate_of && byId.get(root.duplicate_of); i++) root = byId.get(root.duplicate_of);
+  return { root, score: m.score, reasons: m.reasons };
+}

@@ -2,9 +2,9 @@
 // them to open later, and have the assistant turn them into requests sorted into
 // the right sub-projects. People can chat with it about how to organize things.
 import { store } from "./store.js";
-import { AREAS, CURRENT, todayISO, addDaysISO, ticketLabel, PRIORITIES, matchSubProject } from "./fields.js";
+import { AREAS, CURRENT, todayISO, addDaysISO, ticketLabel, matchSubProject } from "./fields.js";
 import { parseEmailHeuristic } from "./emailparse.js";
-import { findMatches, DUP_THRESHOLD } from "./dedupe.js";
+import { findMatches, rejectedMatch, DUP_THRESHOLD } from "./dedupe.js";
 import { S, isManager, hooks } from "./state.js";
 import { modalRoot, esc, opt, badge, fmtDate, toast, guard, icon, openModal } from "./ui.js";
 
@@ -138,7 +138,7 @@ function ruleBasedItems(s) {
 }
 
 function decorate(items, s) {
-  const open = S.requests.filter((r) => !["Rejected", "Cancelled"].includes(r.status));
+  const open = S.requests.filter((r) => !["Rejected", "Cancelled", "Fulfilled", "Duplicate"].includes(r.status));
   return items.map((it) => {
     const item = { ...it, _id: uid(), sub_project: AREAS.includes(it.sub_project) ? it.sub_project : (it.sub_project ? "" : s.defaultSub) };
     const [m] = findMatches({ ...item, project: CURRENT.project }, open, 1);
@@ -252,12 +252,17 @@ async function createRequests() {
   s.step = `Creating ${chosen.length} request${chosen.length === 1 ? "" : "s"}…`;
   hooks.render();
   const later = addDaysISO(todayISO(), 30);
-  const rows = chosen.map((i) => ({
-    project: CURRENT.project, sub_project: i.sub_project || null, buildings: i.buildings || "TBD", rooms: i.rooms || "TBD",
-    item_needed: i.item_needed, ffe_tag: i.ffe_tag || "TBD", spec: i.spec || "", quantity: Math.max(1, Number(i.quantity) || 1),
-    priority: PRIORITIES.includes(i.priority) ? i.priority : "Normal", needed_by: i.needed_by || later, status: "Pending",
-    details: [i.details, i.where && `From ${s.name}, ${i.where}`].filter(Boolean).join("\n"), source: "document", source_ref: s.doc?.id || null,
-  }));
+  const rows = chosen.map((i) => {
+    const row = {
+      project: CURRENT.project, sub_project: i.sub_project || null, buildings: i.buildings || "TBD", rooms: i.rooms || "TBD",
+      item_needed: i.item_needed, ffe_tag: i.ffe_tag || "TBD", spec: i.spec || "", quantity: Math.max(1, Number(i.quantity) || 1),
+      needed_by: i.needed_by || later, status: "Pending",
+      details: [i.details, i.where && `From ${s.name}, ${i.where}`].filter(Boolean).join("\n"), source: "document", source_ref: s.doc?.id || null,
+    };
+    // Managers set priority after approval; already-rejected needs go to Duplicate requests.
+    const again = rejectedMatch(row, S.requests);
+    return again ? { ...row, status: "Duplicate", duplicate_of: again.root.id } : row;
+  });
   const created = await guard(() => store.insertRequests(rows));
   if (created) {
     const subs = [...new Set(chosen.map((i) => i.sub_project).filter(Boolean))];
@@ -349,7 +354,7 @@ function itemsHTML(s) {
         <input type="checkbox" data-change="fa-include" data-id="${i._id}" ${i._include ? "checked" : ""} aria-label="Include">
         <div class="fa-item-main">
           <input class="fa-title" value="${esc(i.item_needed)}" data-change="fa-field" data-field="item_needed" data-id="${i._id}" aria-label="What's needed">
-          <div class="muted small">${[i.buildings && `Bldg ${i.buildings}`, i.rooms && `Rm ${i.rooms}`, i.ffe_tag && `Tag ${i.ffe_tag}`, i.quantity > 1 && `Qty ${i.quantity}`, i.needed_by && `By ${fmtDate(i.needed_by)}`, i.priority !== "Normal" && i.priority].filter(Boolean).map(esc).join(" · ")}${i.where ? ` <span class="tiny">(${esc(i.where)})</span>` : ""}</div>
+          <div class="muted small">${[i.buildings && `Bldg ${i.buildings}`, i.rooms && `Rm ${i.rooms}`, i.ffe_tag && `Tag ${i.ffe_tag}`, i.quantity > 1 && `Qty ${i.quantity}`, i.needed_by && `Deliver by ${fmtDate(i.needed_by)}`].filter(Boolean).map(esc).join(" · ")}${i.where ? ` <span class="tiny">(${esc(i.where)})</span>` : ""}</div>
           ${i._dup ? `<div class="small">${badge(`Already requested: ${i._dup}`, "pending")}</div>` : ""}
         </div>
         ${AREAS.length ? `<select data-change="fa-sub" data-id="${i._id}" aria-label="Sub-project">${opt("", "Sub-project…")}${AREAS.map((a) => opt(a, a, i.sub_project === a)).join("")}</select>` : ""}

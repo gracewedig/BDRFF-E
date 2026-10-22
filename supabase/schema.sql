@@ -49,7 +49,7 @@ create table if not exists public.requests (
   details text,
   photos jsonb not null default '[]'::jsonb,      -- [{ path, kind: 'concept' | 'damage', name }]
   status text not null default 'Pending'
-    check (status in ('Pending', 'Approved', 'In Progress', 'Completed', 'Rejected', 'Cancelled')),
+    check (status in ('Pending', 'Duplicate', 'Approved', 'In Progress', 'Fulfilled', 'Rejected', 'Cancelled')),
   requested_by uuid default auth.uid() references public.profiles (id) on delete set null,
   requester_name text,
   source text not null default 'app' check (source in ('app', 'email', 'import', 'document')),
@@ -93,7 +93,8 @@ alter table public.requests add column if not exists follow_up_by_name text;
 create or replace function public.guard_request_update()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
-  if public.is_manager() then
+  -- Managers, and changes made directly in the Supabase dashboard / SQL editor (no signed-in user).
+  if auth.uid() is null or public.is_manager() then
     return new;
   end if;
   -- Anyone may add notes or a follow-up (through set_item_notes / set_follow_up).
@@ -101,17 +102,46 @@ begin
      = (to_jsonb(old) - array['notes', 'notes_updated_at', 'notes_updated_by_name', 'follow_up_on', 'follow_up_note', 'follow_up_by_name', 'updated_at']) then
     return new;
   end if;
-  if old.requested_by is distinct from auth.uid() or old.status <> 'Pending' then
+  if old.requested_by is distinct from auth.uid() or old.status not in ('Pending', 'Duplicate') then
     raise exception 'Only managers can change this request';
   end if;
-  if new.status not in ('Pending', 'Cancelled')
+  if new.status not in ('Pending', 'Duplicate', 'Cancelled')
      or new.reviewed_by is distinct from old.reviewed_by
      or new.review_note is distinct from old.review_note
+     or new.priority is distinct from old.priority
      or new.requested_by is distinct from old.requested_by then
     raise exception 'Requesters can only edit or cancel their own pending requests';
   end if;
   return new;
 end $$;
+
+-- How the requester expects it to be filled, fulfilled history, duplicates of
+-- earlier (rejected) requests, and the spec-sheet item and its price.
+alter table public.requests add column if not exists fulfillment text check (fulfillment in ('attic', 'order', 'unsure'));
+alter table public.requests add column if not exists fulfilled_at timestamptz;
+alter table public.requests add column if not exists fulfilled_by_name text;
+alter table public.requests add column if not exists duplicate_of uuid references public.requests (id) on delete set null;
+alter table public.requests add column if not exists spec_item_id uuid;
+alter table public.requests add column if not exists unit_price numeric(12, 2);
+
+-- "Completed" is now called "Fulfilled"; requests can also wait in "Duplicate".
+alter table public.requests drop constraint if exists requests_status_check;
+update public.requests set status = 'Fulfilled', fulfilled_at = coalesce(fulfilled_at, updated_at) where status = 'Completed';
+alter table public.requests add constraint requests_status_check
+  check (status in ('Pending', 'Duplicate', 'Approved', 'In Progress', 'Fulfilled', 'Rejected', 'Cancelled'));
+
+-- Managers set the priority after approving, so new requests from anyone else start at Normal.
+create or replace function public.guard_request_insert()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is not null and not public.is_manager() then
+    new.priority := 'Normal';
+  end if;
+  return new;
+end $$;
+drop trigger if exists guard_request_insert on public.requests;
+create trigger guard_request_insert before insert on public.requests
+  for each row execute function public.guard_request_insert();
 
 drop trigger if exists guard_request_update on public.requests;
 create trigger guard_request_update before update on public.requests
@@ -280,6 +310,25 @@ grant execute on function public.link_email_duplicate to authenticated;
 alter table public.requests drop constraint if exists requests_source_check;
 alter table public.requests add constraint requests_source_check check (source in ('app', 'email', 'import', 'document'));
 
+-- ------------------------------------------------------------- spec sheet
+-- The FF&E spec items people pick from on the request form, with item prices.
+create table if not exists public.spec_items (
+  id uuid primary key default gen_random_uuid(),
+  project text not null,
+  sub_project text,              -- empty = available in every sub-project
+  name text not null,
+  ffe_tag text,
+  spec text,
+  manufacturer text,
+  vendor text,
+  unit_price numeric(12, 2),
+  unit text not null default 'ea',
+  notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists spec_items_project on public.spec_items (project, sub_project, name);
+
 -- -------------------------------------------- uploaded files (PDFs, spreadsheets)
 -- Kept with the project (and the sub-project they were uploaded to) so anyone can
 -- open them later; sub_projects lists every sub-project their requests went to.
@@ -337,6 +386,13 @@ alter table public.inventory_moves enable row level security;
 alter table public.email_requests enable row level security;
 alter table public.app_settings enable row level security;
 alter table public.documents enable row level security;
+alter table public.spec_items enable row level security;
+
+drop policy if exists "everyone sees the spec sheet" on public.spec_items;
+create policy "everyone sees the spec sheet" on public.spec_items for select to authenticated using (true);
+drop policy if exists "managers edit the spec sheet" on public.spec_items;
+create policy "managers edit the spec sheet" on public.spec_items for all to authenticated
+  using (public.is_manager()) with check (public.is_manager());
 
 drop policy if exists "everyone sees documents" on public.documents;
 create policy "everyone sees documents" on public.documents for select to authenticated using (true);
@@ -361,7 +417,7 @@ returns void language plpgsql security definer set search_path = public as $$
 declare t text;
 begin
   if not public.is_manager() then raise exception 'Only managers can rename projects'; end if;
-  foreach t in array array['requests', 'inventory_items', 'email_requests'] loop
+  foreach t in array array['requests', 'inventory_items', 'email_requests', 'spec_items'] loop
     if p_sub_old is null then
       execute format('update public.%I set project = $1 where project = $2', t) using p_new, p_old;
     else
@@ -402,10 +458,12 @@ drop policy if exists "everyone sees requests" on public.requests;
 create policy "everyone sees requests" on public.requests for select to authenticated using (true);
 drop policy if exists "staff submit requests" on public.requests;
 create policy "staff submit requests" on public.requests for insert to authenticated
-  with check (requested_by = auth.uid() and ((status = 'Pending' and reviewed_by is null) or public.is_manager()));
+  with check (requested_by = auth.uid() and ((status in ('Pending', 'Duplicate') and reviewed_by is null) or public.is_manager()));
 drop policy if exists "managers or requester update" on public.requests;
 create policy "managers or requester update" on public.requests for update to authenticated
-  using (public.is_manager() or (requested_by = auth.uid() and status = 'Pending'));
+  using (public.is_manager() or (requested_by = auth.uid() and status in ('Pending', 'Duplicate')))
+  -- What a requester may change (e.g. cancelling) is checked by guard_request_update.
+  with check (public.is_manager() or requested_by = auth.uid());
 drop policy if exists "managers delete requests" on public.requests;
 create policy "managers delete requests" on public.requests for delete to authenticated using (public.is_manager());
 
@@ -457,7 +515,7 @@ end $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests', 'app_settings', 'documents'] loop
+  foreach t in array array['profiles', 'inventory_items', 'inventory_moves', 'email_requests', 'app_settings', 'documents', 'spec_items'] loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
     exception when duplicate_object then null;

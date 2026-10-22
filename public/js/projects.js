@@ -2,12 +2,13 @@
 // signing in; managers add projects and sub-projects here too.
 import { store } from "./store.js";
 import {
-  PROJECTS, AREAS, CURRENT, SETTINGS, OPEN_STATUSES, STATUSES, FIELD_MAP, applySettings, subProjects, toRow, todayISO, isOverdue,
+  PROJECTS, AREAS, CURRENT, SETTINGS, OPEN_STATUSES, STATUSES, FIELD_MAP, applySettings, subProjects, toRow, todayISO, isOverdue, money,
 } from "./fields.js";
 import { S, isManager, hooks } from "./state.js";
 import { esc, slug, badge, toast, guard, icon, tableHTML } from "./ui.js";
 import { isLow } from "./inventory.js";
 import { filesListHTML } from "./files.js";
+import { downloadWorkbook } from "./export.js";
 
 const enc = encodeURIComponent;
 export const areaHref = (name) => `#/area/${enc(name)}`;
@@ -114,6 +115,7 @@ export function pageProject() {
     <a class="btn small" href="#/files">${icon("import")} Upload or see all</a>
   </div>
   <div class="card flush">${filesListHTML({ limit: 5, empty: "No files yet. Upload spreadsheets and PDFs from Files & Assistant or from any sub-project page." })}</div>
+  ${fulfilledHTML()}
   ${noSub && AREAS.length ? `<p class="muted small">${noSub} request${noSub === 1 ? " isn't" : "s aren't"} assigned to a sub-project. <a href="#/requests">See all requests</a>.</p>` : ""}
   ${isManager() ? `
   <form class="inline-add big" data-form="add-sub" data-tour="add-sub">
@@ -134,7 +136,7 @@ export function pageArea() {
   const next = AREAS[(i + 1) % AREAS.length];
   const st = areaStats(name);
   const items = S.inventory.filter((it) => it.sub_project === name).sort((a, b) => a.item_name.localeCompare(b.item_name));
-  const cols = ["ticket", "buildings", "rooms", "item_needed", "ffe_tag", "needed_by", "priority", "status", "notes"].map((k) => FIELD_MAP[k]);
+  const cols = ["ticket", "buildings", "rooms", "item_needed", "ffe_tag", "fulfillment", "needed_by", "priority", "status", "notes"].map((k) => FIELD_MAP[k]);
   const openRows = st.rows.filter((r) => OPEN_STATUSES.includes(r.status)).sort((a, b) => a.needed_by.localeCompare(b.needed_by));
   return `
   <div class="area-nav">
@@ -159,6 +161,7 @@ export function pageArea() {
     </div>
   </div>
   <div class="card flush">${tableHTML(cols, openRows, { empty: `No open requests for ${name}.` })}</div>
+  ${fulfilledHTML(name)}
   <div class="section-head">
     <h2 class="section">Files &amp; spreadsheets</h2>
     <button class="btn small primary" data-act="upload-here" data-sub="${esc(name)}" data-tour="upload-here">${icon("import")} Upload spreadsheet or PDF here</button>
@@ -178,6 +181,26 @@ export function pageArea() {
     </tbody></table></div>` : `<div class="empty">No inventory recorded for ${esc(name)}.</div>`}</div>`;
 }
 
+/* ------------------------------------------------- fulfilled history */
+const fulfilledRows = (sub) => S.requests
+  .filter((r) => r.status === "Fulfilled" && (sub === undefined || r.sub_project === sub))
+  .map((r) => toRow(r))
+  .sort((a, b) => (b.fulfilled_at || b._raw.updated_at || "").localeCompare(a.fulfilled_at || a._raw.updated_at || ""));
+const FULFILLED_COLS = ["ticket", "sub_project", "item_needed", "ffe_tag", "quantity", "fulfillment", "est_cost", "fulfilled_at", "fulfilled_by_name", "notes"];
+
+function fulfilledHTML(sub) {
+  const rows = fulfilledRows(sub);
+  const cols = FULFILLED_COLS.filter((k) => !(sub !== undefined && k === "sub_project") && !(k === "sub_project" && !AREAS.length)).map((k) => FIELD_MAP[k]);
+  const total = rows.reduce((n, r) => n + (r.est_cost === "" ? 0 : Number(r.est_cost)), 0);
+  return `
+  <div class="section-head">
+    <h2 class="section">Fulfilled history <span class="muted">(${rows.length})</span></h2>
+    ${rows.length ? `<button class="btn small" data-act="fulfilled-export" data-sub="${esc(sub ?? "")}" data-all="${sub === undefined ? "1" : ""}">${icon("download")} Export</button>` : ""}
+  </div>
+  <div class="card flush">${tableHTML(cols, rows, { empty: `Nothing fulfilled for ${sub || CURRENT.project} yet. Requests marked Fulfilled are kept here.`, groupBy: sub === undefined && AREAS.length ? "sub_project" : "none" })}
+    ${total ? `<p class="muted small more">Item cost on file: <b>${esc(money(total))}</b> (items only; no shipping, freight or install).</p>` : ""}</div>`;
+}
+
 /* ------------------------------------------------------------ actions */
 const PROJECT_KEY = (uid) => `bdr-ffe-project-${uid}`;
 export function savedProject() {
@@ -194,6 +217,8 @@ export async function openProject(name) {
   S.reqFilter = { q: "", sub: "", status: "" };
   S.inv = { ...S.inv, sub: "" };
   S.imp = null;
+  S.draft = { photos: [], sub: "", specId: "", fulfillment: "" };
+  S.specFilter = { sub: "", q: "" };
   await hooks.reload();
 }
 
@@ -213,6 +238,14 @@ export const CLICK = {
     location.hash = "#/project";
   },
   "new-in-area"(el) { S.draft = { ...S.draft, sub: el.dataset.sub }; location.hash = "#/new"; },
+  "fulfilled-export"(el) {
+    const sub = el.dataset.all ? undefined : el.dataset.sub;
+    const cols = FULFILLED_COLS.map((k) => FIELD_MAP[k]);
+    const tabs = sub === undefined && AREAS.length
+      ? AREAS.map((a) => ({ name: a, columns: cols, rows: fulfilledRows(a) })).filter((t) => t.rows.length)
+      : [{ name: "Fulfilled", columns: cols, rows: fulfilledRows(sub) }];
+    downloadWorkbook(`${sub || CURRENT.project} Fulfilled FF&E ${todayISO()}`, tabs);
+  },
   "inv-in-area"(el) { S.inv = { ...S.inv, sub: el.dataset.sub }; location.hash = "#/inventory"; },
 };
 

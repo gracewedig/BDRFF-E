@@ -215,7 +215,7 @@ function connectCard() {
     </div></div>`;
 }
 
-const STATUS_BADGE = { new: "pending", ticket: "approved", email: "inv", other: "proj", sent: "completed" };
+const STATUS_BADGE = { new: "pending", ticket: "approved", email: "inv", other: "proj", sent: "fulfilled" };
 
 function reportHTML(r) {
   const today = todayISO();
@@ -241,9 +241,9 @@ function reportHTML(r) {
     <p class="ol-overview">${esc(r.overview || overviewText(r))}</p>
   </div>
   <div class="card flush">${items.length ? `<div class="table-wrap"><table class="grid">
-    <thead><tr><th>Needed by</th><th>Where</th><th>What</th><th>From</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th>Desired delivery</th><th>Where</th><th>What</th><th>From</th><th>Status</th><th></th></tr></thead>
     <tbody>${items.map((i) => `<tr>
-      <td data-label="Needed by" class="nowrap ${i.needed_by && i.needed_by < today ? "overdue" : ""}">${i.needed_by ? esc(fmtDate(i.needed_by)) : '<span class="muted">No date</span>'}
+      <td data-label="Desired delivery" class="nowrap ${i.needed_by && i.needed_by < today ? "overdue" : ""}">${i.needed_by ? esc(fmtDate(i.needed_by)) : '<span class="muted">No date</span>'}
         ${i.priority !== "Normal" ? `<div>${badge(i.priority, `p-${i.priority.toLowerCase()}`)}</div>` : ""}</td>
       <td data-label="Where"><strong>${esc(i.sub_project || i.project || "—")}</strong>${i.project && i.sub_project ? `<div class="muted tiny">${esc(i.project)}</div>` : ""}
         <div class="muted small">${[i.buildings && `Bldg ${i.buildings}`, i.rooms && `Rm ${i.rooms}`].filter(Boolean).map(esc).join(" · ")}</div></td>
@@ -315,7 +315,7 @@ export const CLICK = {
     const r = ol.report;
     const rows = r.items.map((i) => ({ ...i, status: r.sent?.[i.id] ? "Sent to Email Requests" : statusFor(i).label, received: (i.received || "").slice(0, 10) }));
     const cols = [
-      ["needed_by", "Needed By"], ["priority", "Priority"], ["project", "Project"], ["sub_project", "Sub-project"], ["buildings", "Building(s)"],
+      ["needed_by", "Desired Delivery"], ["priority", "Priority"], ["project", "Project"], ["sub_project", "Sub-project"], ["buildings", "Building(s)"],
       ["rooms", "Room(s)"], ["item_needed", "What's Needed"], ["ffe_tag", "FF&E Tag"], ["quantity", "Qty"], ["from", "From"],
       ["from_email", "From Email"], ["received", "Received"], ["subject", "Subject"], ["status", "Status"],
     ].map(([key, label]) => ({ key, label }));

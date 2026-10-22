@@ -1,5 +1,5 @@
 // Shared rendering helpers used by every page module.
-import { FIELD_MAP, CLOSED_STATUSES, isOverdue } from "./fields.js";
+import { FIELD_MAP, CLOSED_STATUSES, isOverdue, money } from "./fields.js";
 
 export const app = document.getElementById("app");
 export const modalRoot = document.getElementById("modal-root");
@@ -74,6 +74,7 @@ export function cellHTML(key, row) {
   if (key === "priority") return v === "Normal" ? esc(v) : badge(v, `p-${slug(v)}`);
   if (key === "needed_by") return `<span class="${isOverdue(row) ? "overdue" : ""}">${esc(fmtDate(v))}</span>`;
   if (FIELD_MAP[key]?.type === "date") return esc(fmtDate(v));
+  if (key === "unit_price" || key === "est_cost") return esc(money(v));
   if (key === "ticket") return `<strong class="mono">${esc(v)}</strong>`;
   if (key === "days_until_due" && v !== "" && !CLOSED_STATUSES.includes(row.status)) return `<span class="${v < 0 ? "overdue" : ""}">${esc(v)}</span>`;
   return esc(v);
